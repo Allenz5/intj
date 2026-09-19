@@ -19,11 +19,7 @@
 另外三栏始终对应同一个 md 文档：
 
 - **文档栏**：显示当前 md 文档，是界面的主体。选中文字可以添加 comment、开启子文档或 split doc，右键可以开启 AI 会话，点击超链接跳转到子文档。详见[文档栏](doc-panel.md)。
-- **comment 栏**：显示当前文档的 comment。每条 comment 对应一个 AI 会话，卡片上显示会话状态（进行中 / 已完成 / 已退出），并有三个操作：
-  - **打开终端**：在 terminal 栏打开这个会话的终端。
-  - **Merge**：提交会话 worktree 里的改动，把会话分支合并到当前分支，会话继续保留。
-    - 鼠标悬停在 Merge 上时，文档栏显示该 worktree 里的 README，并高亮与主干不同的地方；鼠标移开立即切回主干的 README，方便比对。
-  - **End**：直接结束会话，删除它的 worktree 和分支。
+- **comment 栏**：显示当前文档的 comment，每条 comment 对应一个 AI 会话，卡片上显示会话状态，可以打开终端、Merge 或 End 会话。详见[comment 栏](comment-panel.md)。
 - **terminal 栏**：显示当前文档的 AI 会话终端。默认打开一个直接在主干上的 AI 会话，关掉会话终端后回到它。
   - **合并会话**：快速合并任意个 AI 会话（merge）。
 
