@@ -19,9 +19,8 @@
 另外三栏始终对应同一个 md 文档：
 
 - **文档栏**：显示当前 md 文档，是界面的主体。选中文字可以添加 comment、开启子文档或 split doc，右键可以开启 AI 会话，点击超链接跳转到子文档。详见[文档栏](doc-panel.md)。
-- **comment 栏**：显示当前文档的 comment，每条 comment 对应一个 AI 会话，卡片上显示会话状态，可以打开终端、Merge 或 End 会话。详见[comment 栏](comment-panel.md)。
+- **comment 栏**：显示当前文档的 comment，每条 comment 对应一个 AI 会话，卡片上显示会话状态，可以打开终端、Merge 或 End 会话，也可以一次合并任意个会话。详见[comment 栏](comment-panel.md)。
 - **terminal 栏**：显示当前文档的 AI 会话终端。默认打开一个直接在主干上的 AI 会话，关掉会话终端后回到它。
-  - **合并会话**：快速合并任意个 AI 会话（merge）。
 
 切换文档时，comment 栏和 terminal 栏跟着切换到新文档。
 
