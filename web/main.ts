@@ -3,7 +3,9 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
-type Session = { id: string; doc: string; quote: string; prompt: string; branch: string; status: 'running' | 'exited'; busy: boolean; unmerged: boolean }
+// Where a comment sits: its quote plus the text around it (whitespace removed) and its relative position.
+type Anchor = { quote: string; prefix: string; suffix: string; pos: number }
+type Session = Anchor & { id: string; doc: string; prompt: string; branch: string; status: 'running' | 'exited'; busy: boolean; unmerged: boolean }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 const wsUrl = (p: string) => `ws://${location.host}${p}`
@@ -159,9 +161,10 @@ $('tree-toggle').onclick = () => {
 
 // ---- Anchoring a quote in the rendered preview ----
 
-// Match ignoring whitespace, since a selection's text and the DOM's text nodes differ in line breaks.
-function findRange(root: HTMLElement, quote: string): Range | null {
-  const chars: { node: Text; offset: number }[] = []
+// Work on text with whitespace removed, since a selection's text and the DOM's text nodes differ in line breaks.
+type Flat = { chars: { node: Text; offset: number }[]; flat: string }
+function flatten(root: HTMLElement): Flat {
+  const chars: Flat['chars'] = []
   let flat = ''
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
@@ -171,15 +174,61 @@ function findRange(root: HTMLElement, quote: string): Range | null {
       flat += n.data[i]
     }
   }
-  const needle = quote.replace(/\s+/g, '')
-  const at = needle ? flat.indexOf(needle) : -1
-  if (at < 0) return null
-  const start = chars[at]
-  const end = chars[at + needle.length - 1]
+  return { chars, flat }
+}
+
+// A range over flat characters [start, end), collapsed at start when empty.
+function toRange(f: Flat, start: number, end: number) {
   const range = document.createRange()
-  range.setStart(start.node, start.offset)
-  range.setEnd(end.node, end.offset + 1)
+  const c = f.chars[Math.min(start, f.chars.length - 1)]
+  range.setStart(c.node, c.offset + (start >= f.chars.length ? 1 : 0))
+  if (end > start) {
+    const e = f.chars[end - 1]
+    range.setEnd(e.node, e.offset + 1)
+  } else range.collapse(true)
   return range
+}
+
+const CONTEXT = 30
+function anchorOf(root: HTMLElement, range: Range, quote: string): Anchor {
+  const f = flatten(root)
+  const inside = f.chars.flatMap((c, i) =>
+    range.comparePoint(c.node, c.offset) === 0 && range.comparePoint(c.node, c.offset + 1) === 0 ? [i] : [],
+  )
+  const start = inside[0] ?? 0
+  const end = (inside.at(-1) ?? -1) + 1
+  return {
+    quote,
+    prefix: f.flat.slice(Math.max(0, start - CONTEXT), start),
+    suffix: f.flat.slice(end, end + CONTEXT),
+    pos: f.flat.length ? start / f.flat.length : 0,
+  }
+}
+
+// How many characters of ctx match flat, walking from `at` in direction dir.
+function agree(flat: string, at: number, ctx: string, dir: 1 | -1) {
+  let n = 0
+  while (n < ctx.length && flat[at + dir * n] === ctx[dir > 0 ? n : ctx.length - 1 - n]) n++
+  return n
+}
+
+// Find the quote again, taking the occurrence whose surroundings match best. If the quote itself
+// was edited (usually by a merge), take what now sits between its old surroundings, then its old position.
+function locate(f: Flat, a: Anchor): { range: Range; exact: boolean } {
+  const q = a.quote.replace(/\s+/g, '')
+  let best = -1
+  let bestScore = -1
+  for (let i = q ? f.flat.indexOf(q) : -1; i >= 0; i = f.flat.indexOf(q, i + 1)) {
+    const score = agree(f.flat, i - 1, a.prefix, -1) + agree(f.flat, i + q.length, a.suffix, 1)
+    if (score > bestScore) [best, bestScore] = [i, score]
+  }
+  if (best >= 0) return { range: toRange(f, best, best + q.length), exact: true }
+  const p = f.flat.indexOf(a.prefix)
+  const start = p < 0 ? -1 : p + a.prefix.length
+  const end = a.suffix ? f.flat.indexOf(a.suffix, Math.max(start, 0)) : f.flat.length
+  if (start >= 0 && end >= start) return { range: toRange(f, start, end), exact: false }
+  const at = start >= 0 ? start : end >= 0 ? end : Math.round(a.pos * f.flat.length)
+  return { range: toRange(f, at, at), exact: false }
 }
 
 // ---- Comment cards ----
@@ -273,13 +322,14 @@ function layoutCards() {
   const base = gutter.getBoundingClientRect().top
   const ranges: Range[] = []
   let floor = 0
+  const f = flatten(preview)
   const cards = [...gutter.querySelectorAll<HTMLElement>('.card')]
   const placed = cards.map((card) => {
     const s = sessions.find((x) => x.id === card.dataset.id)!
-    const range = findRange(preview, s.quote)
-    if (range) ranges.push(range)
-    card.classList.toggle('orphan', !range)
-    return { card, top: range ? range.getBoundingClientRect().top - base : Infinity }
+    const hit = f.chars.length ? locate(f, s) : null
+    if (hit && !hit.range.collapsed) ranges.push(hit.range)
+    card.classList.toggle('orphan', !hit?.exact)
+    return { card, top: hit ? hit.range.getBoundingClientRect().top - base : Infinity }
   })
   placed.sort((a, b) => a.top - b.top)
   for (const p of placed) {
@@ -294,12 +344,12 @@ window.addEventListener('resize', layoutCards)
 
 // ---- Selection popup ----
 
-let pendingQuote = ''
+let pendingAnchor: Anchor = { quote: '', prefix: '', suffix: '', pos: 0 }
 const popup = $('popup')
 const popupInput = $<HTMLInputElement>('popup-input')
 
 function showPopup(quote: string, range: Range | null, x: number, y: number) {
-  pendingQuote = quote
+  pendingAnchor = range ? anchorOf($('preview'), range, quote) : { quote, prefix: '', suffix: '', pos: 0 }
   // Focusing the input clears the selection, so keep it visible as a highlight.
   if (range) CSS.highlights?.set('intj-pending', new Highlight(range))
   popup.style.left = `${Math.min(x, window.innerWidth - 420)}px`
@@ -310,7 +360,8 @@ function showPopup(quote: string, range: Range | null, x: number, y: number) {
 }
 
 $('preview').addEventListener('mouseup', (e) => {
-  if (e.button !== 0) return
+  // Ctrl-click is a right-click on macOS.
+  if (e.button !== 0 || e.ctrlKey) return
   const sel = getSelection()
   const text = sel?.toString().trim() ?? ''
   if (!sel || !text) return
@@ -319,15 +370,27 @@ $('preview').addEventListener('mouseup', (e) => {
   showPopup(text, range.cloneRange(), rect.left, rect.bottom)
 })
 
+// On macOS a right-click first selects the word under the cursor, so keep the selection from before it.
+let selBeforeRightClick: Range | null = null
+$('preview').addEventListener('mousedown', (e) => {
+  if (e.button !== 2 && !e.ctrlKey) return
+  const sel = getSelection()
+  selBeforeRightClick = sel && sel.toString().trim() ? sel.getRangeAt(0).cloneRange() : null
+})
+
 // Right-click opens a session on the selection, or else on the block under the cursor.
 $('preview').addEventListener('contextmenu', (e) => {
   e.preventDefault()
-  const sel = getSelection()
-  const text = sel?.toString().trim() ?? ''
-  if (sel && text) return showPopup(text, sel.getRangeAt(0).cloneRange(), e.clientX, e.clientY)
+  getSelection()?.removeAllRanges()
+  const saved = selBeforeRightClick
+  if (saved) return showPopup(saved.toString().trim(), saved, e.clientX, e.clientY)
   const block = (e.target as HTMLElement).closest<HTMLElement>('p, li, h1, h2, h3, h4, h5, h6, pre, blockquote, td, th')
   const quote = block?.textContent?.trim() ?? ''
-  const range = quote ? findRange($('preview'), quote) : null
+  let range: Range | null = null
+  if (block && quote) {
+    range = document.createRange()
+    range.selectNodeContents(block)
+  }
   showPopup(quote, range, e.clientX, e.clientY)
 })
 
@@ -347,7 +410,7 @@ async function startChat(skill?: string) {
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ doc: docName, quote: pendingQuote, prompt, skill }),
+    body: JSON.stringify({ doc: docName, anchor: pendingAnchor, prompt, skill }),
   })
   const data = await res.json()
   if (!res.ok) return alert(data.error)
