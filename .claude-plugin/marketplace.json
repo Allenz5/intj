@@ -5,7 +5,7 @@
     {
       "name": "intj",
       "source": "./",
-      "description": "Skills for intj: update docs, open a worktree, merge worktrees, split a doc."
+      "description": "Skills for intj: update docs, merge worktrees, split a doc."
     }
   ]
 }
