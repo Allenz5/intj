@@ -238,3 +238,6 @@ button:hover {
   border: 1px solid #cfd3d8;
   border-radius: 4px;
 }
+#preview .diff {
+  background: #e3f4e6;
+}
