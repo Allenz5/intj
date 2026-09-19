@@ -126,6 +126,14 @@ body {
   opacity: 0.6;
   pointer-events: none;
 }
+/* Picking a card to fork from. */
+.forking .card {
+  cursor: pointer;
+}
+.forking .card:hover {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+}
 .card.orphan .card-quote {
   text-decoration: line-through;
 }

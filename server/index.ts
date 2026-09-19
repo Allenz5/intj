@@ -1,5 +1,6 @@
 import http from 'node:http'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
@@ -20,8 +21,8 @@ let workloadRel = ''
 const agent = process.env.INTJ_AGENT ?? 'claude'
 const port = Number(process.env.PORT ?? 5173)
 
-const git = (args: string[], cwd = projectDir) =>
-  execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' })
+const git = (args: string[], cwd = projectDir, env = process.env) =>
+  execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe', env })
 
 // ---- Project and workload ----
 
@@ -148,6 +149,8 @@ type Session = AgentTerm & {
   prompt: string
   branch: string
   worktree: string
+  // The agent's conversation id, so a fork can continue the conversation.
+  chat: string
 }
 type Anchor = Pick<Session, 'quote' | 'prefix' | 'suffix' | 'pos'>
 const sessions = new Map<string, Session>()
@@ -162,23 +165,43 @@ const publicSession = (s: Session) => {
 }
 const broadcastSessions = () => broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
 
+// A commit of the worktree as it is now, uncommitted and untracked files included, leaving its index alone.
+function snapshot(s: Session) {
+  const index = path.join(os.tmpdir(), `intj-index-${crypto.randomUUID()}`)
+  const env = { ...process.env, GIT_INDEX_FILE: index }
+  try {
+    git(['add', '-A'], s.worktree, env)
+    const tree = git(['write-tree'], s.worktree, env).trim()
+    const head = git(['rev-parse', 'HEAD'], s.worktree).trim()
+    if (tree === git(['rev-parse', 'HEAD^{tree}'], s.worktree).trim()) return head
+    return git(['commit-tree', tree, '-p', head, '-m', `intj ${s.id}: snapshot for fork`], s.worktree).trim()
+  } finally {
+    fs.rmSync(index, { force: true })
+  }
+}
+
 // With a skill, the prompt becomes the skill's optional argument and leads the message,
 // since the agent only recognizes a slash command at the start.
-function startSession(doc: string, anchor: Anchor, prompt: string, skill?: string) {
+// With `from`, the session starts from that session's files and conversation as they are now.
+function startSession(doc: string, anchor: Anchor, prompt: string, skill?: string, from?: Session) {
   const { quote } = anchor
   const id = crypto.randomBytes(3).toString('hex')
   const branch = `intj/${id}`
   const worktree = path.join(workloadDir, 'worktrees', id)
-  git(['worktree', 'add', '-b', branch, worktree])
+  git(['worktree', 'add', '-b', branch, worktree, ...(from ? [snapshot(from)] : [])])
 
   // Quote the selection as context only; naming the doc made agents think they should edit it.
   const quoted = quote ? quote.split('\n').map((l) => `> ${l}`).join('\n') + '\n\n' : ''
   // Pass the prompt through the environment to avoid shell quoting issues.
   if (skill) prompt = `/intj:${skill} ${prompt}`.trim()
-  const text = skill ? `${prompt}\n\n${quoted}` : quoted + prompt
-  const t = spawnAgent(worktree, `${agent} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+  let text = skill ? `${prompt}\n\n${quoted}` : quoted + prompt
+  // The forked conversation names the old worktree's paths, so point the agent at its own copy.
+  if (from) text = `(Forked: you now work in ${worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
+  const chat = crypto.randomUUID()
+  const resume = from ? `--resume ${from.chat} --fork-session ` : ''
+  const t = spawnAgent(worktree, `${agent} ${resume}--session-id ${chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
   // Extend the same object: its pty callbacks update buffer and status in place.
-  const s: Session = Object.assign(t, { id, doc, ...anchor, prompt, branch, worktree })
+  const s: Session = Object.assign(t, { id, doc, ...anchor, prompt, branch, worktree, chat })
   sessions.set(id, s)
   broadcastSessions()
   return s
@@ -275,8 +298,10 @@ server.on('request', async (req, res) => {
       return sendJson(res, 200, { text: readDoc(docFile(workloadDir, docName)) })
     }
     if (req.method === 'POST' && url === '/api/sessions') {
-      const { doc, anchor, prompt, skill } = await readBody(req)
-      return sendJson(res, 200, publicSession(startSession(doc, anchor, prompt, skill)))
+      const { doc, anchor, prompt, skill, from } = await readBody(req)
+      const src = from && sessions.get(from)
+      if (from && !src) return sendJson(res, 404, { error: `no session ${from}` })
+      return sendJson(res, 200, publicSession(startSession(doc, anchor, prompt, skill, src)))
     }
     if (req.method === 'GET' && url === '/api/tree') {
       // Tracked plus untracked-but-not-ignored files, so the tree follows .gitignore.
