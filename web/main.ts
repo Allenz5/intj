@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
-type Session = { id: string; quote: string; prompt: string; branch: string; status: 'running' | 'exited'; busy: boolean; unmerged: boolean }
+type Session = { id: string; doc: string; quote: string; prompt: string; branch: string; status: 'running' | 'exited'; busy: boolean; unmerged: boolean }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 const wsUrl = (p: string) => `ws://${location.host}${p}`
@@ -52,6 +52,7 @@ async function openDoc(name: string) {
   $('doc-name').textContent = name
   docText = text
   showMainDoc()
+  renderCards()
   loadTree()
   const { parent } = await (await fetch(`/api/parent?name=${encodeURIComponent(name)}`)).json()
   if (docName !== name) return
@@ -194,6 +195,7 @@ function renderCards() {
   const gutter = $('gutter')
   gutter.innerHTML = ''
   for (const s of sessions) {
+    if (s.doc !== docName) continue
     const card = document.createElement('div')
     card.className = 'card'
     card.dataset.id = s.id
@@ -345,7 +347,7 @@ async function startChat(skill?: string) {
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ quote: pendingQuote, prompt, skill }),
+    body: JSON.stringify({ doc: docName, quote: pendingQuote, prompt, skill }),
   })
   const data = await res.json()
   if (!res.ok) return alert(data.error)

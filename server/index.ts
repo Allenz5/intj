@@ -88,6 +88,8 @@ const getMainTerm = () => {
 
 type Session = AgentTerm & {
   id: string
+  // The doc the session was started from; its card shows only there.
+  doc: string
   quote: string
   prompt: string
   branch: string
@@ -100,14 +102,14 @@ const hasUnmerged = (s: Session) =>
   !!git(['status', '--porcelain'], s.worktree).trim() || git(['rev-list', '--count', `HEAD..${s.branch}`]).trim() !== '0'
 
 const publicSession = (s: Session) => {
-  const { id, quote, prompt, branch, status, busy } = s
-  return { id, quote, prompt, branch, status, busy, unmerged: hasUnmerged(s) }
+  const { id, doc, quote, prompt, branch, status, busy } = s
+  return { id, doc, quote, prompt, branch, status, busy, unmerged: hasUnmerged(s) }
 }
 const broadcastSessions = () => broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
 
 // With a skill, the prompt becomes the skill's optional argument and leads the message,
 // since the agent only recognizes a slash command at the start.
-function startSession(quote: string, prompt: string, skill?: string) {
+function startSession(doc: string, quote: string, prompt: string, skill?: string) {
   const id = crypto.randomBytes(3).toString('hex')
   const branch = `intj/${id}`
   const worktree = path.join(worktreeRoot, id)
@@ -120,7 +122,7 @@ function startSession(quote: string, prompt: string, skill?: string) {
   const text = skill ? `${prompt}\n\n${quoted}` : quoted + prompt
   const t = spawnAgent(worktree, `${agent} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
   // Extend the same object: its pty callbacks update buffer and status in place.
-  const s: Session = Object.assign(t, { id, quote, prompt, branch, worktree })
+  const s: Session = Object.assign(t, { id, doc, quote, prompt, branch, worktree })
   sessions.set(id, s)
   broadcastSessions()
   return s
@@ -195,8 +197,8 @@ server.on('request', async (req, res) => {
       return sendJson(res, 200, { text: readDoc(docFile(projectDir, docName)) })
     }
     if (req.method === 'POST' && url === '/api/sessions') {
-      const { quote, prompt, skill } = await readBody(req)
-      return sendJson(res, 200, publicSession(startSession(quote, prompt, skill)))
+      const { doc, quote, prompt, skill } = await readBody(req)
+      return sendJson(res, 200, publicSession(startSession(doc, quote, prompt, skill)))
     }
     if (req.method === 'GET' && url === '/api/tree') {
       // Tracked plus untracked-but-not-ignored files, so the tree follows .gitignore.
