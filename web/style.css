@@ -173,12 +173,6 @@ body {
   min-height: 0;
   padding: 8px 0 0 8px;
 }
-#terms-empty {
-  padding: 8px 4px;
-  color: #6b7280;
-  font-family: Menlo, monospace;
-  font-size: 13px;
-}
 .term {
   height: 100%;
 }

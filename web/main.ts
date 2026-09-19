@@ -263,9 +263,11 @@ function sendResize(t: Term) {
   }
 }
 
-function openTerminal(s: Session) {
-  $('terms-empty').hidden = true
-  $('panel-close').hidden = false
+// The terminal shown by default: an agent session on the main checkout.
+const mainTerm = { id: 'main', branch: '主干' }
+
+function openTerminal(s: Pick<Session, 'id' | 'branch'>) {
+  $('panel-close').hidden = s.id === mainTerm.id
   $('panel-title').textContent = s.branch
   let t = terms.get(s.id)
   if (!t) {
@@ -301,17 +303,11 @@ function closeTerminal(id: string) {
     t.el.remove()
     terms.delete(id)
   }
-  if (activeId === id) clearPanel()
+  if (activeId === id) openTerminal(mainTerm)
 }
 
-function clearPanel() {
-  for (const x of terms.values()) x.el.hidden = true
-  $('terms-empty').hidden = false
-  $('panel-close').hidden = true
-  $('panel-title').textContent = 'terminal'
-  activeId = null
-}
-$('panel-close').onclick = clearPanel
+$('panel-close').onclick = () => openTerminal(mainTerm)
+openTerminal(mainTerm)
 
 new ResizeObserver(() => {
   const t = activeId && terms.get(activeId)

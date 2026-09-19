@@ -26,21 +26,55 @@ if (!fs.existsSync(excludeFile) || !fs.readFileSync(excludeFile, 'utf8').include
   fs.appendFileSync(excludeFile, '\n.intj/\n')
 }
 
-// ---- Sessions: one agent terminal per worktree ----
+// ---- Agent terminals ----
 
-type Session = {
-  id: string
-  quote: string
-  prompt: string
-  branch: string
-  worktree: string
+type AgentTerm = {
   status: 'running' | 'exited'
   term: IPty
   buffer: string
   clients: Set<WebSocket>
 }
-const sessions = new Map<string, Session>()
 const MAX_BUFFER = 500_000
+
+function spawnAgent(cwd: string, command: string, env: Record<string, string> = {}): AgentTerm {
+  const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', command], {
+    name: 'xterm-256color',
+    cwd,
+    cols: 100,
+    rows: 30,
+    env: { ...process.env, COLORTERM: 'truecolor', ...env },
+  })
+  const t: AgentTerm = { status: 'running', term, buffer: '', clients: new Set() }
+  term.onData((data) => {
+    // Keep recent output so a terminal opened later (or after a page reload) shows history.
+    t.buffer = (t.buffer + data).slice(-MAX_BUFFER)
+    for (const ws of t.clients) ws.send(data)
+  })
+  term.onExit(() => {
+    t.status = 'exited'
+    for (const ws of t.clients) ws.send('\r\n[进程已退出]\r\n')
+    broadcastSessions()
+  })
+  return t
+}
+
+// The default terminal: a plain agent session on the main checkout, restarted if it has exited.
+let mainTerm: AgentTerm | null = null
+const getMainTerm = () => {
+  if (mainTerm?.status !== 'running') mainTerm = spawnAgent(projectDir, agent)
+  return mainTerm
+}
+
+// ---- Sessions: one agent terminal per worktree ----
+
+type Session = AgentTerm & {
+  id: string
+  quote: string
+  prompt: string
+  branch: string
+  worktree: string
+}
+const sessions = new Map<string, Session>()
 
 const publicSession = ({ id, quote, prompt, branch, status }: Session) => ({ id, quote, prompt, branch, status })
 const broadcastSessions = () => broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
@@ -54,24 +88,9 @@ function startSession(quote: string, prompt: string) {
   // Quote the selection as context only; naming the doc made agents think they should edit it.
   const quoted = quote ? quote.split('\n').map((l) => `> ${l}`).join('\n') + '\n\n' : ''
   // Pass the prompt through the environment to avoid shell quoting issues.
-  const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', `${agent} "$INTJ_PROMPT"`], {
-    name: 'xterm-256color',
-    cwd: worktree,
-    cols: 100,
-    rows: 30,
-    env: { ...process.env, COLORTERM: 'truecolor', INTJ_PROMPT: quoted + prompt },
-  })
-  const s: Session = { id, quote, prompt, branch, worktree, status: 'running', term, buffer: '', clients: new Set() }
-  term.onData((data) => {
-    // Keep recent output so a terminal opened later (or after a page reload) shows history.
-    s.buffer = (s.buffer + data).slice(-MAX_BUFFER)
-    for (const ws of s.clients) ws.send(data)
-  })
-  term.onExit(() => {
-    s.status = 'exited'
-    for (const ws of s.clients) ws.send('\r\n[进程已退出]\r\n')
-    broadcastSessions()
-  })
+  const t = spawnAgent(worktree, `${agent} "$INTJ_PROMPT"`, { INTJ_PROMPT: quoted + prompt })
+  // Extend the same object: its pty callbacks update buffer and status in place.
+  const s: Session = Object.assign(t, { id, quote, prompt, branch, worktree })
   sessions.set(id, s)
   broadcastSessions()
   return s
@@ -184,7 +203,7 @@ eventsWss.on('connection', (ws) => {
 })
 
 const ptyWss = new WebSocketServer({ noServer: true })
-ptyWss.on('connection', (ws, s: Session) => {
+ptyWss.on('connection', (ws, s: AgentTerm) => {
   ws.send(s.buffer)
   s.clients.add(ws)
   ws.on('message', (raw) => {
@@ -203,7 +222,8 @@ server.on('upgrade', (req, socket, head) => {
     eventsWss.handleUpgrade(req, socket, head, (ws) => eventsWss.emit('connection', ws, req))
     return
   }
-  const s = sessions.get(url.match(/^\/pty\/(\w+)$/)?.[1] ?? '')
+  const id = url.match(/^\/pty\/(\w+)$/)?.[1] ?? ''
+  const s = id === 'main' ? getMainTerm() : sessions.get(id)
   if (s) ptyWss.handleUpgrade(req, socket, head, (ws) => ptyWss.emit('connection', ws, s))
 })
 
