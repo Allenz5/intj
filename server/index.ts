@@ -21,6 +21,10 @@ let workloadRel = ''
 // The agent is just a command run in a terminal, so any CLI agent can be swapped in.
 // Mutable so the picker can set it before the main terminal starts.
 let agentCmd = process.env.INTJ_AGENT ?? 'claude'
+// Directories a session's worktree is cone-checked-out to; empty means a full checkout. Set from the
+// picker (or INTJ_SPARSE) to speed up worktree creation on a huge repo.
+const parseCone = (s: string) => s.split(/[\s:,]+/).filter(Boolean)
+let sparseCone = parseCone(process.env.INTJ_SPARSE ?? '')
 const port = Number(process.env.PORT ?? 5173)
 
 // Git runs off the event loop: on a large repo a status/worktree call takes seconds, and a
@@ -40,12 +44,11 @@ async function openProject(dir: string) {
   } catch {
     await git(['init'])
   }
-  // Workload docs are tracked so every worktree has them; keep only worktrees out of the main repo's
-  // status, without touching tracked files.
+  // The whole .intj tree stays out of git: docs are never committed or pushed, and each session's
+  // worktree gets them copied in. Doc changes are 3-way merged back with git merge-file, not git merge.
   const excludeFile = path.resolve(projectDir, (await git(['rev-parse', '--git-dir'])).trim(), 'info', 'exclude')
-  // Older versions excluded all of .intj/, which would hide the docs; keep excluding just the worktrees there.
-  let text = readDoc(excludeFile).replace(/^\.intj\/$/m, '.intj/worktrees/')
-  if (!/^\.intj\/\*\/worktrees\/$/m.test(text)) text += '\n.intj/*/worktrees/\n'
+  let text = readDoc(excludeFile)
+  if (!/^\.intj\/?$/m.test(text)) text += '\n.intj/\n'
   fs.mkdirSync(path.dirname(excludeFile), { recursive: true })
   fs.writeFileSync(excludeFile, text)
   return listWorkloads()
@@ -69,11 +72,9 @@ async function openWorkload(id?: string) {
   if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
   const dir = path.join(projectDir, '.intj', id)
   if (!fs.existsSync(dir)) {
+    // Docs are not tracked; a session's worktree gets them copied in, so no commit is needed.
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'main.md'), `# ${path.basename(projectDir)}\n`)
-    // Commit the new doc so sessions' worktrees start with it, leaving anything the user staged alone.
-    await git(['add', '--', dir])
-    await git(['commit', '-m', `intj: create workload ${id}`, '--', dir])
   }
   workloadDir = dir
   workloadRel = path.relative((await git(['rev-parse', '--show-toplevel'])).trim(), dir)
@@ -87,12 +88,9 @@ async function deleteWorkload(id: string) {
   for (const s of [...sessions.values()]) {
     if (s.worktree.startsWith(dir + path.sep)) await endSession(s)
   }
+  // Docs are untracked, so nothing to commit: just drop the folder and prune stale worktrees.
+  if (workloadDir === dir) closeDocWatcher()
   fs.rmSync(dir, { recursive: true, force: true })
-  // Record the (tracked) docs' removal so worktrees no longer carry them; prune any stale registration.
-  await git(['add', '--', dir])
-  if ((await git(['status', '--porcelain', '--', dir])).trim()) {
-    await git(['commit', '-m', `intj: delete workload ${id}`, '--', dir])
-  }
   await git(['worktree', 'prune'])
   if (workloadDir === dir) {
     workloadDir = ''
@@ -193,6 +191,80 @@ type Session = AgentTerm & {
   worktree: string
   // The agent's conversation id, so a fork can continue the conversation.
   chat: string
+  // Each doc's content when the session started, its 3-way-merge base for merging changes back.
+  docBase: Record<string, string>
+}
+
+// The workload's doc files (paths relative to `root`), excluding the session worktrees under it.
+function listDocs(root: string): string[] {
+  const out: string[] = []
+  const walk = (rel: string) => {
+    for (const e of fs.readdirSync(path.join(root, rel), { withFileTypes: true })) {
+      if (e.name === 'worktrees') continue
+      const r = rel ? path.join(rel, e.name) : e.name
+      if (e.isDirectory()) walk(r)
+      else if (e.name.endsWith('.md')) out.push(r)
+    }
+  }
+  if (fs.existsSync(root)) walk('')
+  return out
+}
+
+// Whether the session changed any doc versus the base it started from.
+function docsDiffer(s: Session) {
+  const dir = path.join(s.worktree, workloadRel)
+  for (const rel of new Set([...listDocs(dir), ...Object.keys(s.docBase)])) {
+    if (readDoc(path.join(dir, rel)) !== (s.docBase[rel] ?? '')) return true
+  }
+  return false
+}
+
+// A 3-way merge of plain files via git merge-file (no repo needed); on conflict the returned text
+// carries conflict markers.
+async function mergeFile3(ours: string, base: string, theirs: string) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'intj-merge-'))
+  const o = path.join(tmp, 'ours')
+  const b = path.join(tmp, 'base')
+  const t = path.join(tmp, 'theirs')
+  try {
+    fs.writeFileSync(o, ours)
+    fs.writeFileSync(b, base)
+    fs.writeFileSync(t, theirs)
+    try {
+      const out = await git(['merge-file', '-p', '-L', 'current', '-L', 'base', '-L', 'session', o, b, t])
+      return { text: out, conflict: false }
+    } catch (e: any) {
+      // Non-zero exit means conflicts; stdout still holds the merged text with markers.
+      return { text: e.stdout?.toString() ?? theirs, conflict: true }
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+// Merge the session's doc edits back into the workload, 3-way against the base it started from, so
+// concurrent sessions don't clobber each other. Returns the docs that merged with conflicts.
+async function mergeDocs(s: Session) {
+  const srcDir = path.join(s.worktree, workloadRel)
+  const conflicts: string[] = []
+  for (const rel of new Set([...listDocs(srcDir), ...Object.keys(s.docBase)])) {
+    const base = s.docBase[rel] ?? ''
+    const theirs = readDoc(path.join(srcDir, rel))
+    if (theirs === base) continue // the session left this doc alone
+    const oursPath = path.join(workloadDir, rel)
+    const ours = readDoc(oursPath)
+    let text = theirs
+    if (ours !== base && ours !== theirs) {
+      const m = await mergeFile3(ours, base, theirs)
+      text = m.text
+      if (m.conflict) conflicts.push(rel)
+    }
+    fs.mkdirSync(path.dirname(oursPath), { recursive: true })
+    fs.writeFileSync(oursPath, text)
+    // Advance the base so a later merge of the same session only carries new edits.
+    s.docBase[rel] = theirs
+  }
+  return conflicts
 }
 type Anchor = Pick<Session, 'quote' | 'prefix' | 'suffix' | 'pos'>
 const sessions = new Map<string, Session>()
@@ -212,7 +284,8 @@ function refreshUnmerged(s: Session) {
       try {
         const dirty = (await git(['status', '--porcelain'], s.worktree)).trim() !== ''
         const ahead = (await git(['rev-list', '--count', `HEAD..${s.branch}`])).trim() !== '0'
-        const val = dirty || ahead
+        // Docs live outside git, so check them separately, or a doc-only session would never merge.
+        const val = dirty || ahead || docsDiffer(s)
         if (sessions.has(s.id) && unmergedCache.get(s.id) !== val) {
           unmergedCache.set(s.id, val)
           broadcast({ type: 'activity', id: s.id, busy: s.busy, unmerged: val })
@@ -256,14 +329,36 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
   const chat = crypto.randomUUID()
   // For a skill the message leads with the slash command; this is also what the card shows.
   const cmd = skill ? `/intj:${skill} ${prompt}`.trim() : prompt
-  const s: Session = Object.assign(newTerm(), { id, doc, ...anchor, prompt: cmd, branch, worktree, chat })
+  const s: Session = Object.assign(newTerm(), { id, doc, ...anchor, prompt: cmd, branch, worktree, chat, docBase: {} })
   sessions.set(id, s)
   broadcastSessions()
 
   ;(async () => {
     try {
-      const base = from ? [await snapshot(from)] : []
-      await git(['worktree', 'add', '-b', branch, worktree, ...base])
+      const startPoint = from ? await snapshot(from) : 'HEAD'
+      // Materializing a huge repo's whole tree is the bottleneck. When INTJ_SPARSE names directories,
+      // do a cone checkout of just those (with a sparse index) so creation and later git ops touch far
+      // fewer files; otherwise check out the full tree.
+      const cone = sparseCone
+      if (cone.length) {
+        await git(['worktree', 'add', '--no-checkout', '-b', branch, worktree, startPoint])
+        await git(['sparse-checkout', 'init', '--cone', '--sparse-index'], worktree)
+        await git(['sparse-checkout', 'set', ...cone], worktree)
+        await git(['checkout'], worktree)
+      } else {
+        await git(['worktree', 'add', '-b', branch, worktree, startPoint])
+      }
+      // Docs are outside git: copy the workload's docs into the worktree and record each one's
+      // content as this session's merge base. A fork starts from its source session's docs.
+      const srcDocDir = from ? path.join(from.worktree, workloadRel) : workloadDir
+      const destDocDir = path.join(worktree, workloadRel)
+      for (const rel of listDocs(srcDocDir)) {
+        const src = path.join(srcDocDir, rel)
+        const dst = path.join(destDocDir, rel)
+        fs.mkdirSync(path.dirname(dst), { recursive: true })
+        fs.copyFileSync(src, dst)
+        s.docBase[rel] = readDoc(src)
+      }
       const quoted = quote ? quote.split('\n').map((l) => `> ${l}`).join('\n') + '\n\n' : ''
       // The doc's copy in this session's worktree, which is the one the agent should update.
       const file = path.join(worktree, workloadRel, doc)
@@ -289,6 +384,9 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
 }
 
 async function mergeSession(s: Session) {
+  // Merge docs first (outside git) so they land even if the code merge needs a hand-off.
+  const docConflicts = await mergeDocs(s)
+  // Merge the code via git; docs are ignored, so only real code is committed and merged.
   await git(['add', '-A'], s.worktree)
   if ((await git(['status', '--porcelain'], s.worktree)).trim()) {
     await git(['commit', '-m', `intj ${s.id}: ${s.prompt.split('\n')[0]}`], s.worktree)
@@ -299,8 +397,10 @@ async function mergeSession(s: Session) {
     try {
       await git(['merge', '--abort'])
     } catch {}
+    ;(e as any).docConflicts = docConflicts
     throw e
   }
+  return docConflicts
 }
 
 // When git can't merge on its own (usually a conflict), hand the job to the agent on the main
@@ -360,12 +460,17 @@ server.on('request', async (req, res) => {
   try {
     const docName = searchParams.get('name') ?? ''
     if (req.method === 'GET' && url === '/api/state') {
-      return sendJson(res, 200, { workload: workloadDir && path.basename(workloadDir), agent: agentCmd })
+      return sendJson(res, 200, { workload: workloadDir && path.basename(workloadDir), agent: agentCmd, sparse: sparseCone.join(' ') })
     }
     if (req.method === 'POST' && url === '/api/agent') {
       const { command } = await readBody(req)
       agentCmd = String(command ?? '').trim() || 'claude'
       return sendJson(res, 200, { agent: agentCmd })
+    }
+    if (req.method === 'POST' && url === '/api/sparse') {
+      const { dirs } = await readBody(req)
+      sparseCone = parseCone(String(dirs ?? ''))
+      return sendJson(res, 200, { sparse: sparseCone.join(' ') })
     }
     if (req.method === 'GET' && url === '/api/dirs') {
       const dir = path.resolve(searchParams.get('path') || startDir)
@@ -400,13 +505,8 @@ server.on('request', async (req, res) => {
       if (from && !src) return sendJson(res, 404, { error: `no session ${from}` })
       return sendJson(res, 200, publicSession(startSession(doc, anchor, prompt, skill, src)))
     }
-    if (req.method === 'GET' && url === '/api/tree') {
-      // Tracked plus untracked-but-not-ignored files, so the tree follows .gitignore.
-      const files = (await git(['ls-files', '--cached', '--others', '--exclude-standard'])).split('\n').filter(Boolean)
-      return sendJson(res, 200, { files })
-    }
     if (req.method === 'GET' && url === '/api/parent') {
-      return sendJson(res, 200, { parent: await findParent(docName) })
+      return sendJson(res, 200, { parent: findParent(docName) })
     }
     const d = url.match(/^\/api\/sessions\/(\w+)\/doc$/)
     const ds = d && sessions.get(d[1])
@@ -422,13 +522,13 @@ server.on('request', async (req, res) => {
         return sendJson(res, 200, { ok: true })
       }
       try {
-        await mergeSession(s)
+        const docConflicts = await mergeSession(s)
         refreshUnmerged(s)
         broadcastSessions()
-        return sendJson(res, 200, { ok: true })
+        return sendJson(res, 200, { ok: true, docConflicts })
       } catch (e) {
         handOffMerge(s)
-        return sendJson(res, 200, { ok: true, handedOff: true, error: errorText(e) })
+        return sendJson(res, 200, { ok: true, handedOff: true, error: errorText(e), docConflicts: (e as any).docConflicts ?? [] })
       }
     }
     sendJson(res, 404, { error: 'not found' })
@@ -447,11 +547,9 @@ const docFile = (root: string, name: string) => {
 }
 
 // Docs form a tree through links, so a doc's parent is the md file that links to it.
-async function findParent(name: string) {
-  // Run in the workload folder, git lists paths relative to it.
-  const files = (await git(['ls-files', '--cached', '--others', '--exclude-standard'], workloadDir)).split('\n')
-  for (const f of files) {
-    if (!f.endsWith('.md') || f === name) continue
+function findParent(name: string) {
+  for (const f of listDocs(workloadDir)) {
+    if (f === name) continue
     for (const [, href] of readDoc(path.join(workloadDir, f)).matchAll(/\]\(([^)\s]+)/g)) {
       if (/^([a-z]+:|\/|#)/i.test(href)) continue
       if (decodeURIComponent(path.posix.join(path.posix.dirname(f), href.split('#')[0])) === name) return f
@@ -475,15 +573,26 @@ function broadcast(msg: unknown) {
 }
 
 // Watch the directory, not the file: editors (and agents) often save by rename, which breaks a file watch.
-// Any doc can be open, so watch every md file in the workload outside its worktrees.
-const watchDocs = () =>
-  fs.watch(workloadDir, { recursive: true }, (_event, name) => {
-    if (!name?.endsWith('.md') || name.startsWith('worktrees/')) return
+// Non-recursive on purpose: docs sit at the top of the workload (children go next to their parent), and
+// a recursive watch would descend into the session worktrees — huge on a big repo, and it crashes the
+// process when their files churn (scandir on a vanished dir emits an unhandled 'error').
+let docWatcher: fs.FSWatcher | null = null
+const closeDocWatcher = () => {
+  docWatcher?.close()
+  docWatcher = null
+}
+const watchDocs = () => {
+  closeDocWatcher()
+  docWatcher = fs.watch(workloadDir, (_event, name) => {
+    if (!name?.endsWith('.md')) return
     const text = readDoc(path.join(workloadDir, name))
     if (text === lastText.get(name)) return
     lastText.set(name, text)
     broadcast({ type: 'content', name, text })
   })
+  // A watch on a folder that gets removed still emits errors; never let one crash the server.
+  docWatcher.on('error', () => {})
+}
 
 const eventsWss = new WebSocketServer({ noServer: true })
 eventsWss.on('connection', (ws) => {
