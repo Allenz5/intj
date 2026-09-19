@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 
 // Where a comment sits: its quote plus the text around it (whitespace removed) and its relative position.
 type Anchor = { quote: string; prefix: string; suffix: string; pos: number }
-type Session = Anchor & { id: string; doc: string; prompt: string; branch: string; status: 'running' | 'exited'; busy: boolean; unmerged: boolean }
+type Session = Anchor & { id: string; doc: string; prompt: string; branch: string; status: 'creating' | 'running' | 'exited'; busy: boolean; unmerged: boolean }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 const wsUrl = (p: string) => `ws://${location.host}${p}`
@@ -31,8 +31,6 @@ const onEvent = (e: MessageEvent) => {
   } else if (msg.type === 'sessions') {
     sessions = msg.list
     renderCards()
-    // Sent on connect (after the doc name) and after merges, which can change files.
-    loadTree()
   } else if (msg.type === 'activity') {
     // Update in place: re-rendering the cards would cut off a Merge hover preview.
     const s = sessions.find((x) => x.id === msg.id)
@@ -42,6 +40,11 @@ const onEvent = (e: MessageEvent) => {
       s.unmerged = msg.unmerged
       renderState(card, s)
     }
+    // The pty starts at a default size; once it's live, fit it to its pane.
+    const t = activeId && terms.get(activeId)
+    if (t) sendResize(t)
+  } else if (msg.type === 'session-error') {
+    alert(msg.error)
   }
 }
 
@@ -54,7 +57,6 @@ async function openDoc(name: string) {
   docText = text
   showMainDoc()
   renderCards()
-  loadTree()
   const { parent } = await (await fetch(`/api/parent?name=${encodeURIComponent(name)}`)).json()
   if (docName !== name) return
   $('doc-up').hidden = !parent
@@ -103,58 +105,6 @@ function ownText(el: Element) {
   const c = el.cloneNode(true) as Element
   c.querySelectorAll('ul, ol').forEach((x) => x.remove())
   return c.textContent!.trim()
-}
-
-// ---- Directory tree ----
-
-type Dir = Map<string, Dir | null>
-
-async function loadTree() {
-  const { files } = (await (await fetch('/api/tree')).json()) as { files: string[] }
-  const root: Dir = new Map()
-  for (const f of files) {
-    const parts = f.split('/')
-    let dir = root
-    for (const p of parts.slice(0, -1)) {
-      if (!dir.get(p)) dir.set(p, new Map())
-      dir = dir.get(p)!
-    }
-    dir.set(parts.at(-1)!, null)
-  }
-  // Keep folders the user expanded open across reloads.
-  const open = new Set([...$('tree-list').querySelectorAll<HTMLElement>('details[open]')].map((d) => d.dataset.path))
-  $('tree-list').replaceChildren(renderDir(root, '', open))
-}
-
-// Directories first, each a <details> so it folds on its own.
-function renderDir(dir: Dir, prefix: string, open: Set<string | undefined>): HTMLElement {
-  const ul = document.createElement('ul')
-  const entries = [...dir].sort(([a, x], [b, y]) => Number(!x) - Number(!y) || a.localeCompare(b))
-  for (const [name, sub] of entries) {
-    const li = document.createElement('li')
-    const path = prefix + name
-    if (sub) {
-      const details = document.createElement('details')
-      details.dataset.path = path
-      details.open = open.has(path)
-      const summary = document.createElement('summary')
-      summary.textContent = name
-      details.append(summary, renderDir(sub, path + '/', open))
-      li.append(details)
-    } else {
-      li.textContent = name
-      li.classList.toggle('current', path === $('doc-name').textContent)
-    }
-    ul.append(li)
-  }
-  return ul
-}
-
-$('tree-toggle').onclick = () => {
-  const collapsed = $('tree').classList.toggle('collapsed')
-  $('tree-toggle').textContent = collapsed ? '»' : '«'
-  $('tree-toggle').title = collapsed ? 'Expand' : 'Collapse'
-  requestAnimationFrame(layoutCards)
 }
 
 // ---- Anchoring a quote in the rendered preview ----
@@ -279,10 +229,10 @@ function renderCards() {
 }
 
 function renderState(card: HTMLElement, s: Session) {
-  const state = s.status === 'exited' ? 'exited' : s.busy ? 'busy' : 'done'
+  const state = s.status === 'creating' ? 'creating' : s.status === 'exited' ? 'exited' : s.busy ? 'busy' : 'done'
   const el = card.querySelector<HTMLElement>('.card-state')!
   el.className = `card-state ${state}`
-  el.textContent = { busy: 'Working', done: 'Done', exited: 'Exited' }[state]
+  el.textContent = { creating: 'Creating worktree…', busy: 'Working', done: 'Done', exited: 'Exited' }[state]
   // Merge only shows while the worktree has something main doesn't.
   card.querySelector<HTMLElement>('[data-act="merge"]')!.hidden = !s.unmerged
   // A button hidden under the pointer never fires its mouseleave.
@@ -305,11 +255,17 @@ async function runAction(s: Session, act: 'merge' | 'end', card: HTMLElement) {
   const data = await res.json()
   cardErrors.set(s.id, res.ok ? '' : data.error)
   const ok = res.ok && !data.handedOff
-  showCardError(
-    card,
-    data.handedOff ? 'Auto-merge failed; handed to the main terminal to merge with the merge skill' : ok ? (act === 'merge' ? 'Merged' : '') : data.error,
-  )
-  card.querySelector('.card-error')!.classList.toggle('ok', ok)
+  const base = data.handedOff
+    ? 'Auto-merge failed; handed to the main terminal to merge with the merge skill'
+    : ok
+      ? act === 'merge'
+        ? 'Merged'
+        : ''
+      : data.error
+  // Docs merge outside git; note any that came back with conflict markers to resolve.
+  const conflicts = data.docConflicts?.length ? `${base ? '; ' : ''}文档冲突: ${data.docConflicts.join(', ')}(已写入标记)` : ''
+  showCardError(card, base + conflicts)
+  card.querySelector('.card-error')!.classList.toggle('ok', ok && !data.docConflicts?.length)
   if (data.handedOff) openTerminal(mainTerm)
   if (ok && act === 'end') closeTerminal(s.id)
 }
@@ -511,6 +467,48 @@ new ResizeObserver(() => {
   if (t) sendResize(t)
 }).observe($('terms'))
 
+// ---- Agent command ----
+
+// The bash command that starts each agent, set on the picker before the terminals start; default 'claude'.
+let agentCmd = 'claude'
+const pickerAgentInput = $<HTMLInputElement>('picker-agent-cmd')
+
+async function setAgent(command: string) {
+  const res = await fetch('/api/agent', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ command }),
+  })
+  const data = await res.json()
+  if (!res.ok) return alert(data.error)
+  // Reflect the server's normalized value (empty falls back to 'claude').
+  agentCmd = data.agent
+  pickerAgentInput.value = data.agent
+}
+const savePickerAgent = () => setAgent(pickerAgentInput.value)
+pickerAgentInput.onchange = savePickerAgent
+pickerAgentInput.onkeydown = (e) => {
+  if (e.key === 'Enter' && !e.isComposing) savePickerAgent()
+}
+
+// Directories a session's worktree is cone-checked-out to; empty = full checkout.
+const pickerSparseInput = $<HTMLInputElement>('picker-sparse-dirs')
+async function setSparse(dirs: string) {
+  const res = await fetch('/api/sparse', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dirs }),
+  })
+  const data = await res.json()
+  if (!res.ok) return alert(data.error)
+  pickerSparseInput.value = data.sparse
+}
+const saveSparse = () => setSparse(pickerSparseInput.value)
+pickerSparseInput.onchange = saveSparse
+pickerSparseInput.onkeydown = (e) => {
+  if (e.key === 'Enter' && !e.isComposing) saveSparse()
+}
+
 // ---- Divider ----
 
 $('divider').onpointerdown = (e) => {
@@ -562,9 +560,25 @@ async function chooseProject(dir: string) {
       const li = document.createElement('li')
       // Ids start with yyyymmdd-hhmm.
       const [, y, mo, d, h, mi] = w.id.match(/^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)/)!
-      li.textContent = `${y}-${mo}-${d} ${h}:${mi}  ${w.title}`
+      const label = document.createElement('span')
+      label.textContent = `${y}-${mo}-${d} ${h}:${mi}  ${w.title}`
+      li.append(label)
       li.title = w.id
       li.onclick = () => chooseWorkload(w.id)
+      const del = document.createElement('button')
+      del.className = 'workload-del'
+      del.textContent = '×'
+      del.title = 'Delete workload'
+      del.onclick = async (e) => {
+        // Don't also open the workload.
+        e.stopPropagation()
+        if (!confirm('Delete this workload? Its docs and any sessions will be removed.')) return
+        const res = await post('/api/workload/delete', { id: w.id })
+        const out = await res.json()
+        if (!res.ok) return alert(out.error)
+        li.remove()
+      }
+      li.append(del)
       return li
     }),
   )
@@ -589,7 +603,10 @@ function start() {
 // A reload after choosing goes straight back to the workload.
 fetch('/api/state')
   .then((r) => r.json())
-  .then(({ workload }) => {
+  .then(({ workload, agent, sparse }) => {
+    agentCmd = agent ?? 'claude'
+    pickerAgentInput.value = agentCmd
+    pickerSparseInput.value = sparse ?? ''
     if (workload) return start()
     $('picker').hidden = false
     showDir('')
