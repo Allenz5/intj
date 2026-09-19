@@ -111,51 +111,42 @@ type AgentTerm = {
   clients: Set<WebSocket>
 }
 const MAX_BUFFER = 500_000
-// Claude Code reports its state in the terminal title: a spinning glyph while working, ✳ when waiting.
-const TITLE = /\x1b\]0;([^\x07]*)\x07/g
+// Claude Code hooks report the agent's state to /api/activity: a submitted prompt starts a turn, and
+// Stop (or StopFailure on an API error) ends it. An interrupted turn fires neither, so the idle_prompt
+// notification, sent once the agent has sat waiting for input a while, also marks it idle. The hook
+// settings are passed in through $INTJ_HOOKS, which startTerm sets per terminal.
+const agentWithHooks = () => `${agentCmd} --settings "$INTJ_HOOKS"`
+const hooksFor = (id: string) => {
+  const post = (busy: number) => [
+    { hooks: [{ type: 'command', command: `curl -s -m 2 -X POST 'http://127.0.0.1:${port}/api/activity/${id}?busy=${busy}' >/dev/null` }] },
+  ]
+  const idle = post(0)
+  return JSON.stringify({
+    hooks: { UserPromptSubmit: post(1), Stop: idle, StopFailure: idle, Notification: [{ ...idle[0], matcher: 'idle_prompt' }] },
+  })
+}
 
 const newTerm = (): AgentTerm => ({ status: 'creating', busy: true, term: null, buffer: '', clients: new Set() })
 
 // Start the pty for a term object; its callbacks update that same object in place, so a session
 // created earlier (in the 'creating' state) simply gets its terminal filled in here.
 function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<string, string> = {}) {
+  // Sessions extend this object, so an id means this terminal is a session's.
+  const id = (t as Partial<Session>).id ?? 'main'
   const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', command], {
     name: 'xterm-256color',
     cwd,
     cols: 100,
     rows: 30,
-    env: { ...process.env, COLORTERM: 'truecolor', ...env },
+    env: { ...process.env, COLORTERM: 'truecolor', INTJ_HOOKS: hooksFor(id), ...env },
   })
   t.term = term
   t.status = 'running'
   t.busy = true
-  // It titles itself ✳ while booting, before it picks up the first prompt; ignore that one.
-  let working = false
-  const setBusy = (busy: boolean) => {
-    if (t.busy === busy) return
-    t.busy = busy
-    // Sessions extend this object, so an id means this terminal is a session's.
-    const id = (t as Partial<Session>).id
-    // An ended session's worktree is gone, so skip its late output.
-    if (id) {
-      if (sessions.has(id)) {
-        broadcast({ type: 'activity', id, busy, unmerged: unmergedCache.get(id) ?? false })
-        // Recompute the merge state off the event loop rather than blocking on git here.
-        refreshUnmerged(t as Session)
-      }
-    }
-    // The main terminal may have just merged a handed-off session.
-    else if (!busy) broadcastSessions()
-  }
   term.onData((data) => {
     // Keep recent output so a terminal opened later (or after a page reload) shows history.
     t.buffer = (t.buffer + data).slice(-MAX_BUFFER)
     for (const ws of t.clients) ws.send(data)
-    for (const [, title] of data.matchAll(TITLE)) {
-      const idle = title.startsWith('✳')
-      if (!idle) working = true
-      if (working) setBusy(!idle)
-    }
   })
   term.onExit(() => {
     t.status = 'exited'
@@ -165,13 +156,27 @@ function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<strin
   return t
 }
 
+function setBusy(id: string, busy: boolean) {
+  const t = id === 'main' ? mainTerm : sessions.get(id)
+  // An ended session is gone, so its late hooks are dropped.
+  if (!t || t.busy === busy) return
+  t.busy = busy
+  if (id !== 'main') {
+    broadcast({ type: 'activity', id, busy, unmerged: unmergedCache.get(id) ?? false })
+    // Recompute the merge state off the event loop rather than blocking on git here.
+    refreshUnmerged(t as Session)
+  }
+  // The main terminal may have just merged a handed-off session.
+  else if (!busy) broadcastSessions()
+}
+
 const spawnAgent = (cwd: string, command: string, env: Record<string, string> = {}) =>
   startTerm(newTerm(), cwd, command, env)
 
 // The default terminal: a plain agent session on the main checkout, restarted if it has exited.
 let mainTerm: AgentTerm | null = null
 const getMainTerm = () => {
-  if (mainTerm?.status !== 'running') mainTerm = spawnAgent(projectDir, agentCmd)
+  if (mainTerm?.status !== 'running') mainTerm = spawnAgent(projectDir, agentWithHooks())
   return mainTerm
 }
 
@@ -435,7 +440,7 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       if (from) copyChat(from.chat, worktree)
       const resume = from ? `--resume ${from.chat} --fork-session ` : ''
       // Pass the prompt through the environment to avoid shell quoting issues.
-      startTerm(s, worktree, `${agentCmd} ${resume}--session-id ${chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+      startTerm(s, worktree, `${agentWithHooks()} ${resume}--session-id ${chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
       broadcastSessions()
     } catch (e) {
       // Building the worktree failed: drop the placeholder card and report it.
@@ -462,6 +467,7 @@ const midMerge = async (dir: string) => {
 // the session's copy, and when the code won't merge cleanly the current branch is merged into the
 // session's branch instead. The session's agent resolves both; the next Merge is then clean.
 async function mergeSession(s: Session) {
+  if (s.status === 'creating' || (s.status === 'running' && s.busy)) throw new Error('The session is still working; Merge once it is done')
   if (await midMerge(s.worktree)) throw new Error('The worktree is still resolving merge conflicts; Merge again once they are committed')
   // Merge docs first (outside git) so they land even if the code conflicts.
   const docConflicts = await mergeDocs(s)
@@ -506,7 +512,7 @@ function handOffConflicts(s: Session, docs: string[], code: boolean) {
     // Send Enter separately so the TUI doesn't treat it as part of a paste.
     setTimeout(() => s.term?.write('\r'), 300)
   } else {
-    startTerm(s, s.worktree, `${agentCmd} --resume ${s.chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+    startTerm(s, s.worktree, `${agentWithHooks()} --resume ${s.chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
   }
 }
 
@@ -592,6 +598,11 @@ server.on('request', async (req, res) => {
     }
     if (req.method === 'GET' && url === '/api/doc') {
       return sendJson(res, 200, { text: readDoc(docFile(workloadDir, docName)) })
+    }
+    const a = url.match(/^\/api\/activity\/(\w+)$/)
+    if (req.method === 'POST' && a) {
+      setBusy(a[1], searchParams.get('busy') === '1')
+      return sendJson(res, 200, { ok: true })
     }
     if (req.method === 'POST' && url === '/api/sessions') {
       const { doc, anchor, prompt, skill, from } = await readBody(req)

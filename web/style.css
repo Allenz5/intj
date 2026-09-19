@@ -198,6 +198,10 @@ button {
 button:hover {
   background: #eceef0;
 }
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 #popup {
   position: fixed;
   z-index: 10;

@@ -233,10 +233,12 @@ function renderState(card: HTMLElement, s: Session) {
   const el = card.querySelector<HTMLElement>('.card-state')!
   el.className = `card-state ${state}`
   el.textContent = { creating: 'Creating worktree…', busy: 'Working', done: 'Done', exited: 'Exited' }[state]
-  // Merge only shows while the worktree has something main doesn't.
-  card.querySelector<HTMLElement>('[data-act="merge"]')!.hidden = !s.unmerged
-  // A button hidden under the pointer never fires its mouseleave.
-  if (!s.unmerged && previewing === s.id) {
+  // Merge only shows while the worktree has something main doesn't, and can't be clicked mid-turn.
+  const merge = card.querySelector<HTMLButtonElement>('[data-act="merge"]')!
+  merge.hidden = !s.unmerged
+  merge.disabled = state !== 'done' && state !== 'exited'
+  // A button hidden or disabled under the pointer never fires its mouseleave.
+  if ((merge.hidden || merge.disabled) && previewing === s.id) {
     previewing = null
     showMainDoc()
   }
