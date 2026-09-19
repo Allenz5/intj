@@ -316,6 +316,22 @@ async function snapshot(s: Session) {
   }
 }
 
+// Claude Code keeps each conversation at <config>/projects/<cwd, non-alphanumerics as '-'>/<id>.jsonl
+// and --resume only looks in the current cwd's folder. A fork runs in a new worktree, so copy the
+// source conversation into that worktree's folder first (it's written as the chat goes, so a running
+// chat can be forked too).
+function copyChat(chat: string, worktree: string) {
+  const projects = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects')
+  const name = `${chat}.jsonl`
+  const src = fs.existsSync(projects)
+    ? fs.readdirSync(projects).map((d) => path.join(projects, d, name)).find((p) => fs.existsSync(p))
+    : undefined
+  if (!src) throw new Error(`Conversation ${chat} not found under ${projects}`)
+  const dst = path.join(projects, worktree.replace(/[^a-zA-Z0-9]/g, '-'), name)
+  fs.mkdirSync(path.dirname(dst), { recursive: true })
+  fs.copyFileSync(src, dst)
+}
+
 // With a skill, the prompt becomes the skill's optional argument and leads the message,
 // since the agent only recognizes a slash command at the start.
 // With `from`, the session starts from that session's files and conversation as they are now.
@@ -368,6 +384,7 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       let text = skill ? `${cmd}\n\n${context}` : context
       // The forked conversation names the old worktree's paths, so point the agent at its own copy.
       if (from) text = `(Forked: you now work in ${worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
+      if (from) copyChat(from.chat, worktree)
       const resume = from ? `--resume ${from.chat} --fork-session ` : ''
       // Pass the prompt through the environment to avoid shell quoting issues.
       startTerm(s, worktree, `${agentCmd} ${resume}--session-id ${chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
