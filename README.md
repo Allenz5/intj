@@ -29,7 +29,22 @@ intj 对底层的 chat interface 无感。底层可以换成 Claude Code、Codex
 
 ## Skill 库
 
-intj 提供一个 skill 库，包括：
+intj 以插件 `intj` 的形式提供一个 skill 库，安装后 skill 自动带 `intj:` 前缀：
 
-- 更新 README
-- 开 worktree
+- `intj:update-docs`：更新文档，让 md 文档反映当前的工作状态。
+- `intj:open-worktree`：开 worktree，在 `.intj/worktrees/<id>` 下为新的 AI 会话创建分支 `intj/<id>`。
+- `intj:merge-worktree`：合并 worktree，把任意个会话分支合并到当前分支并清理。
+
+安装到 Claude Code：
+
+```sh
+claude plugin marketplace add Allenz5/intj
+claude plugin install intj@intj
+```
+
+安装到 Codex：
+
+```sh
+codex plugin marketplace add Allenz5/intj
+codex plugin add intj@intj
+```

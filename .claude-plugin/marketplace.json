@@ -1,0 +1,11 @@
+{
+  "name": "intj",
+  "owner": { "name": "Allenz5" },
+  "plugins": [
+    {
+      "name": "intj",
+      "source": "./",
+      "description": "Skills for intj: update docs, open a worktree, merge worktrees."
+    }
+  ]
+}
