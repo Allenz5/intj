@@ -119,12 +119,14 @@ const newTerm = (): AgentTerm => ({ status: 'creating', busy: true, term: null, 
 // Start the pty for a term object; its callbacks update that same object in place, so a session
 // created earlier (in the 'creating' state) simply gets its terminal filled in here.
 function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<string, string> = {}) {
+  // Drop CLAUDECODE so an agent still starts when intj itself was launched from inside Claude Code.
+  const { CLAUDECODE, ...baseEnv } = process.env
   const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', command], {
     name: 'xterm-256color',
     cwd,
     cols: 100,
     rows: 30,
-    env: { ...process.env, COLORTERM: 'truecolor', ...env },
+    env: { ...baseEnv, COLORTERM: 'truecolor', ...env },
   })
   t.term = term
   t.status = 'running'
