@@ -147,6 +147,20 @@ body {
   color: #8a919c;
   font-size: 12px;
 }
+.card-state {
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #eef0f3;
+}
+.card-state.busy {
+  background: #fdf1d8;
+  color: #8a5a00;
+}
+.card-state.done {
+  background: #dff3e6;
+  color: #1e6b3a;
+}
 .card-actions {
   display: flex;
   gap: 6px;

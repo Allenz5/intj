@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
-type Session = { id: string; quote: string; prompt: string; branch: string; status: 'running' | 'exited' }
+type Session = { id: string; quote: string; prompt: string; branch: string; status: 'running' | 'exited'; busy: boolean }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 const wsUrl = (p: string) => `ws://${location.host}${p}`
@@ -30,6 +30,14 @@ events.onmessage = (e) => {
     renderCards()
     // Sent on connect (after the doc name) and after merges, which can change files.
     loadTree()
+  } else if (msg.type === 'activity') {
+    // Update in place: re-rendering the cards would cut off a Merge hover preview.
+    const s = sessions.find((x) => x.id === msg.id)
+    const card = document.querySelector<HTMLElement>(`.card[data-id="${msg.id}"]`)
+    if (s && card) {
+      s.busy = msg.busy
+      renderState(card, s)
+    }
   }
 }
 
@@ -156,7 +164,7 @@ function renderCards() {
     card.innerHTML = `
       <div class="card-quote"></div>
       <div class="card-prompt"></div>
-      <div class="card-meta"><code>${s.branch}</code>${s.status === 'exited' ? ' · 已退出' : ''}</div>
+      <div class="card-meta"><span class="card-state"></span><code>${s.branch}</code></div>
       <div class="card-actions">
         <button data-act="open">打开终端</button>
         <button data-act="merge">Merge</button>
@@ -165,6 +173,7 @@ function renderCards() {
       <div class="card-error" hidden></div>`
     card.querySelector('.card-quote')!.textContent = s.quote
     card.querySelector('.card-prompt')!.textContent = s.prompt
+    renderState(card, s)
     const err = cardErrors.get(s.id)
     if (err) showCardError(card, err)
     const merge = card.querySelector<HTMLElement>('[data-act="merge"]')!
@@ -181,6 +190,13 @@ function renderCards() {
     gutter.append(card)
   }
   layoutCards()
+}
+
+function renderState(card: HTMLElement, s: Session) {
+  const state = s.status === 'exited' ? 'exited' : s.busy ? 'busy' : 'done'
+  const el = card.querySelector<HTMLElement>('.card-state')!
+  el.className = `card-state ${state}`
+  el.textContent = { busy: '进行中', done: '已完成', exited: '已退出' }[state]
 }
 
 function showCardError(card: HTMLElement, text: string) {
