@@ -195,7 +195,7 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
   const file = path.join(worktree, workloadRel, doc)
   const context =
     `Doc: ${file}\n\n${quoted && `Selected text:\n${quoted}`}${prompt && `Comment: ${prompt}\n\n`}` +
-    `When done, update the markdown doc at ${file}.`
+    `When done, update the markdown docs in ${path.dirname(file)}.`
   // Pass the prompt through the environment to avoid shell quoting issues.
   if (skill) prompt = `/intj:${skill} ${prompt}`.trim()
   let text = skill ? `${prompt}\n\n${context}` : context
