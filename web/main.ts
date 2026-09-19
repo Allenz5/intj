@@ -10,7 +10,7 @@ type Session = Anchor & { id: string; doc: string; prompt: string; branch: strin
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 const wsUrl = (p: string) => `ws://${location.host}${p}`
 
-const DEFAULT_DOC = 'README.md'
+const DEFAULT_DOC = 'main.md'
 let docName = ''
 let docText = ''
 let sessions: Session[] = []

@@ -49,7 +49,7 @@ function openProject(dir: string) {
 function listWorkloads() {
   const root = path.join(projectDir, '.intj')
   const ids = fs.existsSync(root) ? fs.readdirSync(root).filter((n) => WORKLOAD.test(n)).sort().reverse() : []
-  return ids.map((id) => ({ id, title: readDoc(path.join(root, id, 'README.md')).match(/^#\s+(.+)/m)?.[1] ?? '' }))
+  return ids.map((id) => ({ id, title: readDoc(path.join(root, id, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '' }))
 }
 
 // Open a workload, or create one when no id is given.
@@ -64,7 +64,7 @@ function openWorkload(id?: string) {
   const dir = path.join(projectDir, '.intj', id)
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'README.md'), `# ${path.basename(projectDir)}\n`)
+    fs.writeFileSync(path.join(dir, 'main.md'), `# ${path.basename(projectDir)}\n`)
     // Commit the new doc so sessions' worktrees start with it, leaving anything the user staged alone.
     git(['add', '--', dir])
     git(['commit', '-m', `intj: 新建 workload ${id}`, '--', dir])
