@@ -111,6 +111,19 @@ function mergeSession(s: Session) {
   }
 }
 
+// When git can't merge on its own (usually a conflict), hand the job to the agent on the main
+// checkout, following the merge skill, which resolves conflicts whose intent is clear.
+function handOffMerge(s: Session) {
+  const text = `/intj:merge-worktree ${s.branch}`
+  if (mainTerm?.status === 'running') {
+    mainTerm.term.write(text)
+    // Send Enter separately so the TUI doesn't treat it as part of a paste.
+    setTimeout(() => mainTerm?.term.write('\r'), 300)
+  } else {
+    mainTerm = spawnAgent(projectDir, `${agent} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+  }
+}
+
 function endSession(s: Session) {
   s.term.kill()
   for (const ws of s.clients) ws.close()
@@ -159,9 +172,17 @@ server.on('request', async (req, res) => {
     const m = url.match(/^\/api\/sessions\/(\w+)\/(merge|end)$/)
     const s = m && sessions.get(m[1])
     if (req.method === 'POST' && s) {
-      if (m[2] === 'merge') mergeSession(s)
-      else endSession(s)
-      return sendJson(res, 200, { ok: true })
+      if (m[2] === 'end') {
+        endSession(s)
+        return sendJson(res, 200, { ok: true })
+      }
+      try {
+        mergeSession(s)
+        return sendJson(res, 200, { ok: true })
+      } catch (e) {
+        handOffMerge(s)
+        return sendJson(res, 200, { ok: true, handedOff: true, error: errorText(e) })
+      }
     }
     sendJson(res, 404, { error: 'not found' })
   } catch (e) {

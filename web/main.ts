@@ -153,9 +153,14 @@ async function runAction(s: Session, act: 'merge' | 'end', card: HTMLElement) {
   card.classList.remove('busy')
   const data = await res.json()
   cardErrors.set(s.id, res.ok ? '' : data.error)
-  showCardError(card, res.ok ? (act === 'merge' ? '已合并' : '') : data.error)
-  card.querySelector('.card-error')!.classList.toggle('ok', res.ok)
-  if (res.ok && act === 'end') closeTerminal(s.id)
+  const ok = res.ok && !data.handedOff
+  showCardError(
+    card,
+    data.handedOff ? '自动合并失败，已交给主干终端按 merge skill 处理' : ok ? (act === 'merge' ? '已合并' : '') : data.error,
+  )
+  card.querySelector('.card-error')!.classList.toggle('ok', ok)
+  if (data.handedOff) openTerminal(mainTerm)
+  if (ok && act === 'end') closeTerminal(s.id)
 }
 
 // Place each card level with its quote, pushing down any that would overlap.

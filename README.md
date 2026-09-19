@@ -47,7 +47,7 @@ intj 以插件 `intj` 的形式提供一个 skill 库，安装后 skill 自动�
 
 - `intj:update-docs`：更新文档，让 md 文档反映当前的工作状态。
 - `intj:open-worktree`：开 worktree，在 `.intj/worktrees/<id>` 下为新的 AI 会话创建分支 `intj/<id>`。
-- `intj:merge-worktree`：合并 worktree，把任意个会话分支合并到当前分支并清理。
+- `intj:merge-worktree`：合并 worktree，把任意个会话分支合并到当前分支并提交，保留 worktree 和分支。
 
 安装到 Claude Code：
 
