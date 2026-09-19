@@ -1,0 +1,12 @@
+{
+  "name": "intj",
+  "interface": { "displayName": "intj" },
+  "plugins": [
+    {
+      "name": "intj",
+      "source": { "source": "local", "path": "./" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}
