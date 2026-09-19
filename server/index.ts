@@ -67,7 +67,7 @@ function openWorkload(id?: string) {
     fs.writeFileSync(path.join(dir, 'main.md'), `# ${path.basename(projectDir)}\n`)
     // Commit the new doc so sessions' worktrees start with it, leaving anything the user staged alone.
     git(['add', '--', dir])
-    git(['commit', '-m', `intj: 新建 workload ${id}`, '--', dir])
+    git(['commit', '-m', `intj: create workload ${id}`, '--', dir])
   }
   workloadDir = dir
   workloadRel = path.relative(git(['rev-parse', '--show-toplevel']).trim(), dir)
@@ -121,7 +121,7 @@ function spawnAgent(cwd: string, command: string, env: Record<string, string> = 
   })
   term.onExit(() => {
     t.status = 'exited'
-    for (const ws of t.clients) ws.send('\r\n[进程已退出]\r\n')
+    for (const ws of t.clients) ws.send('\r\n[process exited]\r\n')
     broadcastSessions()
   })
   return t
@@ -395,5 +395,5 @@ server.on('upgrade', (req, socket, head) => {
 })
 
 server.listen(port, '127.0.0.1', () => {
-  console.log(`打开 http://localhost:${port}`)
+  console.log(`Open http://localhost:${port}`)
 })

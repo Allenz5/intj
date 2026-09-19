@@ -20,7 +20,7 @@ In an intj project the markdown docs form a tree under the workload folder `.int
    - Put it next to the parent doc, named after the module in kebab-case (e.g. `comment-panel.md`), unless the conditions say otherwise or the project already keeps child docs elsewhere. Do not overwrite an existing file.
    - Start it with a `# ` heading naming the module, then all of the module's content. Keep its language, wording and structure; adjust only heading levels and relative links so they still work from the new location.
 
-3. **Shorten the module in the parent doc.** Replace it in place with a concise version: same heading or list item, one to three sentences on what the module is and does, and a link to the child doc (e.g. `详见[comment 栏](comment-panel.md)。`, or in English `See [Comment panel](comment-panel.md).`). Keep the doc's language and style. Leave the rest of the doc untouched.
+3. **Shorten the module in the parent doc.** Replace it in place with a concise version: same heading or list item, one to three sentences on what the module is and does, and a link to the child doc (e.g. `See [Comment panel](comment-panel.md).`). Keep the doc's language and style. Leave the rest of the doc untouched.
 
 4. **Check.** Nothing from the module is lost: every point is either in the short version or in the child doc. The link resolves.
 

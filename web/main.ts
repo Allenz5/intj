@@ -153,7 +153,7 @@ function renderDir(dir: Dir, prefix: string, open: Set<string | undefined>): HTM
 $('tree-toggle').onclick = () => {
   const collapsed = $('tree').classList.toggle('collapsed')
   $('tree-toggle').textContent = collapsed ? '»' : '«'
-  $('tree-toggle').title = collapsed ? '展开' : '折叠'
+  $('tree-toggle').title = collapsed ? 'Expand' : 'Collapse'
   requestAnimationFrame(layoutCards)
 }
 
@@ -251,7 +251,7 @@ function renderCards() {
       <div class="card-prompt"></div>
       <div class="card-meta"><span class="card-state"></span><code>${s.branch}</code></div>
       <div class="card-actions">
-        <button data-act="open">打开终端</button>
+        <button data-act="open">Open terminal</button>
         <button data-act="merge">Merge</button>
         <button data-act="end">End</button>
       </div>
@@ -281,7 +281,7 @@ function renderState(card: HTMLElement, s: Session) {
   const state = s.status === 'exited' ? 'exited' : s.busy ? 'busy' : 'done'
   const el = card.querySelector<HTMLElement>('.card-state')!
   el.className = `card-state ${state}`
-  el.textContent = { busy: '进行中', done: '已完成', exited: '已退出' }[state]
+  el.textContent = { busy: 'Working', done: 'Done', exited: 'Exited' }[state]
   // Merge only shows while the worktree has something main doesn't.
   card.querySelector<HTMLElement>('[data-act="merge"]')!.hidden = !s.unmerged
   // A button hidden under the pointer never fires its mouseleave.
@@ -306,7 +306,7 @@ async function runAction(s: Session, act: 'merge' | 'end', card: HTMLElement) {
   const ok = res.ok && !data.handedOff
   showCardError(
     card,
-    data.handedOff ? '自动合并失败，已交给主干终端按 merge skill 处理' : ok ? (act === 'merge' ? '已合并' : '') : data.error,
+    data.handedOff ? 'Auto-merge failed; handed to the main terminal to merge with the merge skill' : ok ? (act === 'merge' ? 'Merged' : '') : data.error,
   )
   card.querySelector('.card-error')!.classList.toggle('ok', ok)
   if (data.handedOff) openTerminal(mainTerm)
@@ -435,7 +435,7 @@ function sendResize(t: Term) {
 }
 
 // The terminal shown by default: an agent session on the main checkout.
-const mainTerm = { id: 'main', branch: '主干' }
+const mainTerm = { id: 'main', branch: 'main' }
 
 function openTerminal(s: Pick<Session, 'id' | 'branch'>) {
   $('panel-close').hidden = s.id === mainTerm.id

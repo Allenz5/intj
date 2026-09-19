@@ -105,7 +105,7 @@ body {
   border-left: 1px solid #e3e5e8;
 }
 #gutter:empty::before {
-  content: '选中文字添加 comment';
+  content: 'Select text to add a comment';
   display: block;
   padding: 16px 12px;
   color: #a0a6af;

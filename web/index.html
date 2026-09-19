@@ -9,15 +9,15 @@
     <div id="picker" hidden>
       <div id="picker-box">
         <section id="pick-folder">
-          <h2>选择项目文件夹</h2>
+          <h2>Choose a project folder</h2>
           <div id="dir-path"></div>
           <ul id="dir-list"></ul>
-          <button id="dir-choose">选择这个文件夹</button>
+          <button id="dir-choose">Use this folder</button>
         </section>
         <section id="pick-workload" hidden>
-          <h2>选择 workload</h2>
+          <h2>Choose a workload</h2>
           <div id="workload-project"></div>
-          <button id="workload-new">新建 workload</button>
+          <button id="workload-new">New workload</button>
           <ul id="workload-list"></ul>
         </section>
       </div>
@@ -25,9 +25,9 @@
     <div id="app" hidden>
       <section id="tree">
         <header class="bar">
-          <span id="tree-title">目录</span>
+          <span id="tree-title">Files</span>
           <span class="spacer"></span>
-          <button id="tree-toggle" title="折叠">«</button>
+          <button id="tree-toggle" title="Collapse">«</button>
         </header>
         <nav id="tree-list"></nav>
       </section>
@@ -49,15 +49,15 @@
         <header class="bar dark">
           <span id="panel-title">terminal</span>
           <span class="spacer"></span>
-          <button id="panel-close" hidden>回到主干</button>
+          <button id="panel-close" hidden>Back to main</button>
         </header>
         <div id="terms"></div>
       </section>
     </div>
     <div id="popup" hidden>
-      <input id="popup-input" placeholder="要 Claude 做什么？" autocomplete="off" />
+      <input id="popup-input" placeholder="What should Claude do?" autocomplete="off" />
       <button id="popup-start">Start chat</button>
-      <button id="popup-split" title="把选中的模块在当前文档里缩成简介，详细内容移到链接的子文档">Split doc</button>
+      <button id="popup-split" title="Shorten the selected module here and move its detail into a linked child doc">Split doc</button>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>
