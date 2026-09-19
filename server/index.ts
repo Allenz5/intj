@@ -93,7 +93,6 @@ function mergeSession(s: Session) {
 }
 
 function endSession(s: Session) {
-  mergeSession(s)
   s.term.kill()
   for (const ws of s.clients) ws.close()
   git(['worktree', 'remove', '--force', s.worktree])

@@ -27,7 +27,7 @@
 - **comment 栏**：显示当前文档的 comment。每条 comment 对应一个 AI 会话，卡片上有三个操作：
   - **打开终端**：在 terminal 栏打开这个会话的终端。
   - **Merge**：提交会话 worktree 里的改动，把会话分支合并到当前分支，会话继续保留。
-  - **End**：先 merge，再结束会话，删除它的 worktree 和分支。
+  - **End**：直接结束会话，删除它的 worktree 和分支。
 - **terminal 栏**：显示当前文档的 AI 会话终端。
   - **合并会话**：快速合并任意个 AI 会话（merge）。
 
