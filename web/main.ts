@@ -210,8 +210,8 @@ function sendResize(t: Term) {
 }
 
 function openTerminal(s: Session) {
-  $('panel').hidden = false
-  $('divider').hidden = false
+  $('terms-empty').hidden = true
+  $('panel-close').hidden = false
   $('panel-title').textContent = s.branch
   let t = terms.get(s.id)
   if (!t) {
@@ -247,16 +247,17 @@ function closeTerminal(id: string) {
     t.el.remove()
     terms.delete(id)
   }
-  if (activeId === id) hidePanel()
+  if (activeId === id) clearPanel()
 }
 
-function hidePanel() {
-  $('panel').hidden = true
-  $('divider').hidden = true
+function clearPanel() {
+  for (const x of terms.values()) x.el.hidden = true
+  $('terms-empty').hidden = false
+  $('panel-close').hidden = true
+  $('panel-title').textContent = 'terminal'
   activeId = null
-  requestAnimationFrame(layoutCards)
 }
-$('panel-close').onclick = hidePanel
+$('panel-close').onclick = clearPanel
 
 new ResizeObserver(() => {
   const t = activeId && terms.get(activeId)

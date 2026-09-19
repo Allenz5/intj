@@ -30,12 +30,13 @@ body {
 }
 #doc-body {
   display: flex;
-  gap: 24px;
-  padding: 16px 20px 80px 28px;
+  min-height: 100%;
 }
 #preview {
-  flex: 0 1 780px;
+  flex: 1 1 780px;
+  max-width: 830px;
   min-width: 0;
+  padding: 16px 24px 80px 28px;
 }
 #preview pre {
   background: #f4f5f6;
@@ -52,13 +53,23 @@ body {
   background: #fbe7a6;
 }
 #gutter {
-  flex: 0 0 260px;
+  flex: 0 0 280px;
   position: relative;
+  margin-left: auto;
+  background: #f7f8f9;
+  border-left: 1px solid #e3e5e8;
+}
+#gutter:empty::before {
+  content: '选中文字添加 comment';
+  display: block;
+  padding: 16px 12px;
+  color: #a0a6af;
+  font-size: 13px;
 }
 .card {
   position: absolute;
-  left: 0;
-  right: 0;
+  left: 10px;
+  right: 10px;
   background: #fff;
   border: 1px solid #e0e3e7;
   border-radius: 8px;
@@ -116,6 +127,12 @@ body {
   flex: 1;
   min-height: 0;
   padding: 8px 0 0 8px;
+}
+#terms-empty {
+  padding: 8px 4px;
+  color: #6b7280;
+  font-family: Menlo, monospace;
+  font-size: 13px;
 }
 .term {
   height: 100%;
