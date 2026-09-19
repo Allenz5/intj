@@ -55,7 +55,10 @@ function spawnAgent(cwd: string, command: string, env: Record<string, string> = 
     t.busy = busy
     // Sessions extend this object, so an id means this terminal is a session's.
     const id = (t as Partial<Session>).id
-    if (id) broadcast({ type: 'activity', id, busy })
+    // An ended session's worktree is gone, so skip its late output.
+    if (id) sessions.has(id) && broadcast({ type: 'activity', id, busy, unmerged: hasUnmerged(t as Session) })
+    // The main terminal may have just merged a handed-off session.
+    else if (!busy) broadcastSessions()
   }
   term.onData((data) => {
     // Keep recent output so a terminal opened later (or after a page reload) shows history.
@@ -92,7 +95,14 @@ type Session = AgentTerm & {
 }
 const sessions = new Map<string, Session>()
 
-const publicSession = ({ id, quote, prompt, branch, status, busy }: Session) => ({ id, quote, prompt, branch, status, busy })
+// Whether the worktree has anything main doesn't: uncommitted edits or commits not merged yet.
+const hasUnmerged = (s: Session) =>
+  !!git(['status', '--porcelain'], s.worktree).trim() || git(['rev-list', '--count', `HEAD..${s.branch}`]).trim() !== '0'
+
+const publicSession = (s: Session) => {
+  const { id, quote, prompt, branch, status, busy } = s
+  return { id, quote, prompt, branch, status, busy, unmerged: hasUnmerged(s) }
+}
 const broadcastSessions = () => broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
 
 // With a skill, the prompt becomes the skill's optional argument and leads the message,
@@ -204,6 +214,7 @@ server.on('request', async (req, res) => {
       }
       try {
         mergeSession(s)
+        broadcastSessions()
         return sendJson(res, 200, { ok: true })
       } catch (e) {
         handOffMerge(s)

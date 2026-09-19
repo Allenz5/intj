@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
-type Session = { id: string; quote: string; prompt: string; branch: string; status: 'running' | 'exited'; busy: boolean }
+type Session = { id: string; quote: string; prompt: string; branch: string; status: 'running' | 'exited'; busy: boolean; unmerged: boolean }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 const wsUrl = (p: string) => `ws://${location.host}${p}`
@@ -36,6 +36,7 @@ events.onmessage = (e) => {
     const card = document.querySelector<HTMLElement>(`.card[data-id="${msg.id}"]`)
     if (s && card) {
       s.busy = msg.busy
+      s.unmerged = msg.unmerged
       renderState(card, s)
     }
   }
@@ -197,6 +198,13 @@ function renderState(card: HTMLElement, s: Session) {
   const el = card.querySelector<HTMLElement>('.card-state')!
   el.className = `card-state ${state}`
   el.textContent = { busy: '进行中', done: '已完成', exited: '已退出' }[state]
+  // Merge only shows while the worktree has something main doesn't.
+  card.querySelector<HTMLElement>('[data-act="merge"]')!.hidden = !s.unmerged
+  // A button hidden under the pointer never fires its mouseleave.
+  if (!s.unmerged && previewing === s.id) {
+    previewing = null
+    showMainDoc()
+  }
 }
 
 function showCardError(card: HTMLElement, text: string) {
