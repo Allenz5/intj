@@ -133,12 +133,14 @@ const newTerm = (): AgentTerm => ({ status: 'creating', busy: true, term: null, 
 function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<string, string> = {}) {
   // Sessions extend this object, so an id means this terminal is a session's.
   const id = (t as Partial<Session>).id ?? 'main'
+  // Drop CLAUDECODE so an agent still starts when intj itself was launched from inside Claude Code.
+  const { CLAUDECODE, ...baseEnv } = process.env
   const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', command], {
     name: 'xterm-256color',
     cwd,
     cols: 100,
     rows: 30,
-    env: { ...process.env, COLORTERM: 'truecolor', INTJ_HOOKS: hooksFor(id), ...env },
+    env: { ...baseEnv, COLORTERM: 'truecolor', INTJ_HOOKS: hooksFor(id), ...env },
   })
   t.term = term
   t.status = 'running'
