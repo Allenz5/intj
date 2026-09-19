@@ -268,6 +268,7 @@ function renderCards() {
       showMainDoc()
     }
     card.onclick = (e) => {
+      if (forking) return forkFrom(s)
       const act = (e.target as HTMLElement).dataset.act
       if (act === 'open') openTerminal(s)
       else if (act === 'merge' || act === 'end') runAction(s, act, card)
@@ -336,6 +337,8 @@ function layoutCards() {
     floor = top + p.card.offsetHeight + 8
   }
   gutter.style.minHeight = `${floor}px`
+  // Fork needs a card on this doc to pick.
+  $<HTMLButtonElement>('popup-fork').disabled = !cards.length
   CSS.highlights?.set('intj-quote', new Highlight(...ranges))
 }
 window.addEventListener('resize', layoutCards)
@@ -398,17 +401,18 @@ function hidePopup() {
 }
 document.addEventListener('mousedown', (e) => {
   if (!popup.contains(e.target as Node)) hidePopup()
+  // Picking a card to fork from: a click anywhere else cancels.
+  if (forking && !(e.target as HTMLElement).closest('.card')) stopForking()
 })
 
 // A skill makes the input optional: it becomes extra conditions for the skill.
-async function startChat(skill?: string) {
-  const prompt = popupInput.value.trim()
+async function startChat(skill?: string, from?: string, anchor = pendingAnchor, prompt = popupInput.value.trim()) {
   if (!prompt && !skill) return popupInput.focus()
   hidePopup()
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ doc: docName, anchor: pendingAnchor, prompt, skill }),
+    body: JSON.stringify({ doc: docName, anchor, prompt, skill, from }),
   })
   const data = await res.json()
   if (!res.ok) return alert(data.error)
@@ -420,6 +424,29 @@ popupInput.onkeydown = (e) => {
   if (e.key === 'Enter' && !e.isComposing) startChat()
   if (e.key === 'Escape') hidePopup()
 }
+
+// Fork chat: keep the selection and prompt, then wait for a card to be clicked.
+let forking: { anchor: Anchor; prompt: string } | null = null
+$('popup-fork').onclick = () => {
+  const prompt = popupInput.value.trim()
+  if (!prompt) return popupInput.focus()
+  forking = { anchor: pendingAnchor, prompt }
+  popup.hidden = true
+  document.body.classList.add('forking')
+}
+function stopForking() {
+  forking = null
+  document.body.classList.remove('forking')
+  CSS.highlights?.delete('intj-pending')
+}
+function forkFrom(s: Session) {
+  const { anchor, prompt } = forking!
+  stopForking()
+  startChat(undefined, s.id, anchor, prompt)
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && forking) stopForking()
+})
 
 // ---- Terminal panel ----
 
