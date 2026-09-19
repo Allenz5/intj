@@ -19,6 +19,15 @@ In an intj project the markdown docs are the interface between the user and the 
    - Leave out changelogs, dates, "updated to…" notes and descriptions of how the work was done.
    - Touch only the sections the change affects.
 
-4. **Add a child doc only when a new submodule has no doc to live in.** Link it from its parent doc.
+4. **Show the result.** Report which docs changed and summarize each edit in one line. Do not commit unless the user asks.
 
-5. **Show the result.** Report which docs changed and summarize each edit in one line. Do not commit unless the user asks.
+## Output
+
+Keep everything you say to the user short while doing the work just as thoroughly.
+
+- Lead with the result. No preamble ("Let me…", "Now I'll…") and no closing recap.
+- Don't narrate steps, restate the request, or describe the plan. Report outcomes and anything the user must act on.
+- Make it easy to read at a glance: structure the report as nested lists (list, sublist, sub-sublist) and avoid long paragraphs.
+- You are allowed to use code blocks for commands, paths and snippets, and tables to compare things side by side.
+- Mention a caveat only when it changes what the user should do next.
+- Never trade correctness for brevity: errors, conflicts and anything you could not update keep their full detail.

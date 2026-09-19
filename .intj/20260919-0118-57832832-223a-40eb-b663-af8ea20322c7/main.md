@@ -41,4 +41,4 @@ intj 对底层的 chat interface 无感。底层可以换成 Claude Code、Codex
 
 ## Skill 库
 
-intj 以插件 `intj` 的形式提供一个 skill 库（更新文档、开 worktree、合并 worktree、拆分文档），可安装到 Claude Code 和 Codex，安装后 skill 自动带 `intj:` 前缀。详见[Skill 库](skill-library.md)。
+intj 以插件 `intj` 的形式提供一个 skill 库（更新文档、合并 worktree、拆分文档），可安装到 Claude Code 和 Codex，安装后 skill 自动带 `intj:` 前缀。详见[Skill 库](skill-library.md)。

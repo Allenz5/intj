@@ -364,7 +364,7 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       const file = path.join(worktree, workloadRel, doc)
       const context =
         `Doc: ${file}\n\n${quoted && `Selected text:\n${quoted}`}${prompt && `Comment: ${prompt}\n\n`}` +
-        `When done, update the markdown docs in ${path.dirname(file)}.`
+        `When done, use the intj:update-docs skill to update the markdown docs in ${path.dirname(file)}.`
       let text = skill ? `${cmd}\n\n${context}` : context
       // The forked conversation names the old worktree's paths, so point the agent at its own copy.
       if (from) text = `(Forked: you now work in ${worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`

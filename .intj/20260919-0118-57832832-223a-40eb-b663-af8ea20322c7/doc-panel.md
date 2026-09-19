@@ -6,7 +6,7 @@
   - **开启子文档**：新建子文档（即添加子模块），并把选中的文字变成指向它的超链接。
   - **Split doc**：在 Start chat 旁边。和 Start chat 一样开启新的 AI 会话，第一条消息调用 `intj:split-doc`，把选中的模块在当前文档里缩成简洁版本，详细内容移到新的子文档并用超链接连过去。输入框的内容可选，作为附加条件一起发出。
   - **Fork chat**：在 Start chat 旁边。点击后再点右边 comment 栏的一条 comment，从这条 comment 的当前状态 fork 出一个新的 AI 会话：新 worktree 从它 worktree 的当前文件开始（包括没提交的改动），并接着它的对话往下聊，原会话不受影响。其他和 Start chat 一样。按 Esc 或点别处取消。
-  - Start chat、Split doc 和 Fork chat 发给 AI 的消息都带上：当前 md 文档在新 worktree 里的路径、选中的内容、comment 内容（输入框里的文字），最后要求 AI 更新这个文档所在文件夹里的 md 文档。
+  - Start chat、Split doc 和 Fork chat 发给 AI 的消息都带上：当前 md 文档在新 worktree 里的路径、选中的内容、comment 内容（输入框里的文字），最后要求 AI 用 `intj:update-docs` skill 更新这个文档所在文件夹里的 md 文档。
 - 在任意位置右键，弹出右键菜单。
   - **开启 AI 会话**：从当前文档开启新的 AI 会话。一个新的 AI 会话 = 一个新的 worktree。
 - 点击指向子文档的超链接，跳转到子文档。
