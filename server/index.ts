@@ -8,20 +8,70 @@ import { createServer as createVite } from 'vite'
 import { WebSocketServer, type WebSocket } from 'ws'
 import pty, { type IPty } from 'node-pty'
 
-const projectDir = path.resolve(process.argv[2] ?? process.cwd())
+// Where the folder picker starts.
+const startDir = path.resolve(process.argv[2] ?? process.cwd())
+// Both are chosen in the picker: the project folder, then a workload in it.
+let projectDir = ''
+// <project>/.intj/<date-time>-<uuid>: the workload's md docs, plus its sessions' worktrees.
+let workloadDir = ''
+// The workload's path from the repo root, which is also where its docs sit in each worktree.
+let workloadRel = ''
 // The agent is just a command run in a terminal, so any CLI agent can be swapped in.
 const agent = process.env.INTJ_AGENT ?? 'claude'
 const port = Number(process.env.PORT ?? 5173)
-const worktreeRoot = path.join(projectDir, '.intj', 'worktrees')
 
 const git = (args: string[], cwd = projectDir) =>
   execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' })
 
-// Keep worktrees out of the main repo's status without touching tracked files.
-const excludeFile = path.resolve(projectDir, git(['rev-parse', '--git-dir']).trim(), 'info', 'exclude')
-if (!fs.existsSync(excludeFile) || !fs.readFileSync(excludeFile, 'utf8').includes('.intj/')) {
+// ---- Project and workload ----
+
+const WORKLOAD = /^\d{8}-\d{4}-[0-9a-f-]{36}$/
+
+function openProject(dir: string) {
+  projectDir = fs.realpathSync(dir)
+  try {
+    git(['rev-parse', '--git-dir'])
+  } catch {
+    git(['init'])
+  }
+  // Workload docs are tracked so every worktree has them; keep only worktrees out of the main repo's
+  // status, without touching tracked files.
+  const excludeFile = path.resolve(projectDir, git(['rev-parse', '--git-dir']).trim(), 'info', 'exclude')
+  // Older versions excluded all of .intj/, which would hide the docs; keep excluding just the worktrees there.
+  let text = readDoc(excludeFile).replace(/^\.intj\/$/m, '.intj/worktrees/')
+  if (!/^\.intj\/\*\/worktrees\/$/m.test(text)) text += '\n.intj/*/worktrees/\n'
   fs.mkdirSync(path.dirname(excludeFile), { recursive: true })
-  fs.appendFileSync(excludeFile, '\n.intj/\n')
+  fs.writeFileSync(excludeFile, text)
+  return listWorkloads()
+}
+
+// Newest first, each titled by its root doc's first heading.
+function listWorkloads() {
+  const root = path.join(projectDir, '.intj')
+  const ids = fs.existsSync(root) ? fs.readdirSync(root).filter((n) => WORKLOAD.test(n)).sort().reverse() : []
+  return ids.map((id) => ({ id, title: readDoc(path.join(root, id, 'README.md')).match(/^#\s+(.+)/m)?.[1] ?? '' }))
+}
+
+// Open a workload, or create one when no id is given.
+function openWorkload(id?: string) {
+  if (!id) {
+    const d = new Date()
+    const p = (n: number) => String(n).padStart(2, '0')
+    const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`
+    id = `${stamp}-${crypto.randomUUID()}`
+  }
+  if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
+  const dir = path.join(projectDir, '.intj', id)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'README.md'), `# ${path.basename(projectDir)}\n`)
+    // Commit the new doc so sessions' worktrees start with it, leaving anything the user staged alone.
+    git(['add', '--', dir])
+    git(['commit', '-m', `intj: 新建 workload ${id}`, '--', dir])
+  }
+  workloadDir = dir
+  workloadRel = path.relative(git(['rev-parse', '--show-toplevel']).trim(), dir)
+  watchDocs()
 }
 
 // ---- Agent terminals ----
@@ -118,7 +168,7 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
   const { quote } = anchor
   const id = crypto.randomBytes(3).toString('hex')
   const branch = `intj/${id}`
-  const worktree = path.join(worktreeRoot, id)
+  const worktree = path.join(workloadDir, 'worktrees', id)
   git(['worktree', 'add', '-b', branch, worktree])
 
   // Quote the selection as context only; naming the doc made agents think they should edit it.
@@ -199,8 +249,30 @@ server.on('request', async (req, res) => {
   if (!url.startsWith('/api/')) return vite.middlewares(req, res)
   try {
     const docName = searchParams.get('name') ?? ''
+    if (req.method === 'GET' && url === '/api/state') {
+      return sendJson(res, 200, { workload: workloadDir && path.basename(workloadDir) })
+    }
+    if (req.method === 'GET' && url === '/api/dirs') {
+      const dir = path.resolve(searchParams.get('path') || startDir)
+      const dirs = fs
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+        .map((e) => e.name)
+        .sort()
+      return sendJson(res, 200, { path: dir, parent: path.dirname(dir), dirs })
+    }
+    if (req.method === 'POST' && url === '/api/project') {
+      const { path: dir } = await readBody(req)
+      const workloads = openProject(dir)
+      return sendJson(res, 200, { project: projectDir, workloads })
+    }
+    if (req.method === 'POST' && url === '/api/workload') {
+      const { id } = await readBody(req)
+      openWorkload(id)
+      return sendJson(res, 200, { ok: true })
+    }
     if (req.method === 'GET' && url === '/api/doc') {
-      return sendJson(res, 200, { text: readDoc(docFile(projectDir, docName)) })
+      return sendJson(res, 200, { text: readDoc(docFile(workloadDir, docName)) })
     }
     if (req.method === 'POST' && url === '/api/sessions') {
       const { doc, anchor, prompt, skill } = await readBody(req)
@@ -218,7 +290,7 @@ server.on('request', async (req, res) => {
     const ds = d && sessions.get(d[1])
     if (req.method === 'GET' && ds) {
       // The worktree's current file, uncommitted edits included, since merge commits them.
-      return sendJson(res, 200, { text: readDoc(docFile(ds.worktree, docName)) })
+      return sendJson(res, 200, { text: readDoc(docFile(path.join(ds.worktree, workloadRel), docName)) })
     }
     const m = url.match(/^\/api\/sessions\/(\w+)\/(merge|end)$/)
     const s = m && sessions.get(m[1])
@@ -253,10 +325,11 @@ const docFile = (root: string, name: string) => {
 
 // Docs form a tree through links, so a doc's parent is the md file that links to it.
 function findParent(name: string) {
-  const files = git(['ls-files', '--cached', '--others', '--exclude-standard']).split('\n')
+  // Run in the workload folder, git lists paths relative to it.
+  const files = git(['ls-files', '--cached', '--others', '--exclude-standard'], workloadDir).split('\n')
   for (const f of files) {
     if (!f.endsWith('.md') || f === name) continue
-    for (const [, href] of readDoc(path.join(projectDir, f)).matchAll(/\]\(([^)\s]+)/g)) {
+    for (const [, href] of readDoc(path.join(workloadDir, f)).matchAll(/\]\(([^)\s]+)/g)) {
       if (/^([a-z]+:|\/|#)/i.test(href)) continue
       if (decodeURIComponent(path.posix.join(path.posix.dirname(f), href.split('#')[0])) === name) return f
     }
@@ -279,14 +352,15 @@ function broadcast(msg: unknown) {
 }
 
 // Watch the directory, not the file: editors (and agents) often save by rename, which breaks a file watch.
-// Any doc can be open, so watch every md file outside worktrees and dependencies.
-fs.watch(projectDir, { recursive: true }, (_event, name) => {
-  if (!name?.endsWith('.md') || /^(\.intj|node_modules)\//.test(name)) return
-  const text = readDoc(path.join(projectDir, name))
-  if (text === lastText.get(name)) return
-  lastText.set(name, text)
-  broadcast({ type: 'content', name, text })
-})
+// Any doc can be open, so watch every md file in the workload outside its worktrees.
+const watchDocs = () =>
+  fs.watch(workloadDir, { recursive: true }, (_event, name) => {
+    if (!name?.endsWith('.md') || name.startsWith('worktrees/')) return
+    const text = readDoc(path.join(workloadDir, name))
+    if (text === lastText.get(name)) return
+    lastText.set(name, text)
+    broadcast({ type: 'content', name, text })
+  })
 
 const eventsWss = new WebSocketServer({ noServer: true })
 eventsWss.on('connection', (ws) => {
@@ -321,6 +395,5 @@ server.on('upgrade', (req, socket, head) => {
 })
 
 server.listen(port, '127.0.0.1', () => {
-  console.log(`intj: ${projectDir}`)
   console.log(`打开 http://localhost:${port}`)
 })

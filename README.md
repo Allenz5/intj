@@ -2,6 +2,13 @@
 
 一个以 markdown 文档为交互界面的 AI 编程工作台。
 
+## 启动界面
+
+打开后先选项目文件夹，再选新建 workload 或加载已有的 workload，然后进入主界面。
+
+- 一个 workload 的 md 文档和 intj 用到的数据（会话的 worktree）都放在 `<项目>/.intj/<日期时间>-<uuid>/` 下，日期时间精确到分。
+- 文档提交进项目的 git 仓库，这样每个会话的 worktree 里都有它们；只有 `.intj/*/worktrees/` 被排除在 git 外。选的文件夹不是 git 仓库时自动 `git init`。
+
 ## 文档树
 
 界面的主体是一组有层级关系的 markdown 文档。

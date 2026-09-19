@@ -6,7 +6,23 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <div id="app">
+    <div id="picker" hidden>
+      <div id="picker-box">
+        <section id="pick-folder">
+          <h2>选择项目文件夹</h2>
+          <div id="dir-path"></div>
+          <ul id="dir-list"></ul>
+          <button id="dir-choose">选择这个文件夹</button>
+        </section>
+        <section id="pick-workload" hidden>
+          <h2>选择 workload</h2>
+          <div id="workload-project"></div>
+          <button id="workload-new">新建 workload</button>
+          <ul id="workload-list"></ul>
+        </section>
+      </div>
+    </div>
+    <div id="app" hidden>
       <section id="tree">
         <header class="bar">
           <span id="tree-title">目录</span>

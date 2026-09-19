@@ -5,7 +5,7 @@ description: Update the project's markdown docs so they describe the current sta
 
 # Update docs
 
-In an intj project the markdown docs are the interface between the user and the agent. They form a tree: `README.md` at the root, with child docs for submodules. Each doc describes what its part of the project is and does. This skill brings the docs back in line with the work.
+In an intj project the markdown docs are the interface between the user and the agent. They form a tree under the workload folder `.intj/<date-time>-<uuid>/`: `README.md` at the root, with child docs for submodules. Each doc describes what its part of the project is and does. This skill brings the docs back in line with the work.
 
 ## Steps
 
