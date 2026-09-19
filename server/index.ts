@@ -138,6 +138,12 @@ server.on('request', async (req, res) => {
       const files = git(['ls-files', '--cached', '--others', '--exclude-standard']).split('\n').filter(Boolean)
       return sendJson(res, 200, { files })
     }
+    const d = url.match(/^\/api\/sessions\/(\w+)\/doc$/)
+    const ds = d && sessions.get(d[1])
+    if (req.method === 'GET' && ds) {
+      // The worktree's current file, uncommitted edits included, since merge commits them.
+      return sendJson(res, 200, { text: readDoc(path.join(ds.worktree, docName)) })
+    }
     const m = url.match(/^\/api\/sessions\/(\w+)\/(merge|end)$/)
     const s = m && sessions.get(m[1])
     if (req.method === 'POST' && s) {
@@ -153,9 +159,9 @@ server.on('request', async (req, res) => {
 
 // ---- WebSockets ----
 
-const readDoc = () => {
+const readDoc = (file = docPath) => {
   try {
-    return fs.readFileSync(docPath, 'utf8')
+    return fs.readFileSync(file, 'utf8')
   } catch {
     return ''
   }

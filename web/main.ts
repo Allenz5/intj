@@ -10,6 +10,8 @@ const wsUrl = (p: string) => `ws://${location.host}${p}`
 
 let docText = ''
 let sessions: Session[] = []
+// Id of the session whose worktree doc is shown while its Merge button is hovered.
+let previewing: string | null = null
 
 // ---- Document ----
 
@@ -19,14 +21,43 @@ events.onmessage = (e) => {
   if (msg.type === 'content') {
     if (msg.name) $('doc-name').textContent = msg.name
     docText = msg.text
-    $('preview').innerHTML = marked.parse(docText) as string
-    layoutCards()
+    // A merge while hovering changes the main doc, so re-diff against it.
+    const s = sessions.find((x) => x.id === previewing)
+    if (s) showWorktreeDoc(s)
+    else showMainDoc()
   } else if (msg.type === 'sessions') {
     sessions = msg.list
     renderCards()
     // Sent on connect (after the doc name) and after merges, which can change files.
     loadTree()
   }
+}
+
+function showMainDoc() {
+  $('preview').innerHTML = marked.parse(docText) as string
+  layoutCards()
+}
+
+// Show a session's worktree doc, marking blocks whose text isn't in the main doc.
+async function showWorktreeDoc(s: Session) {
+  previewing = s.id
+  const { text } = await (await fetch(`/api/sessions/${s.id}/doc`)).json()
+  // The pointer may have left (or moved to another card) while fetching.
+  if (previewing !== s.id) return
+  const main = document.createElement('div')
+  main.innerHTML = marked.parse(docText) as string
+  const known = new Set([...main.querySelectorAll(BLOCKS)].map(ownText))
+  const preview = $('preview')
+  preview.innerHTML = marked.parse(text) as string
+  for (const el of preview.querySelectorAll(BLOCKS)) el.classList.toggle('diff', !known.has(ownText(el)))
+}
+
+const BLOCKS = 'p, li, h1, h2, h3, h4, h5, h6, pre, td, th'
+// A list item's text without its nested lists, so a change deep in a list marks only that item.
+function ownText(el: Element) {
+  const c = el.cloneNode(true) as Element
+  c.querySelectorAll('ul, ol').forEach((x) => x.remove())
+  return c.textContent!.trim()
 }
 
 // ---- Directory tree ----
@@ -111,6 +142,11 @@ function findRange(root: HTMLElement, quote: string): Range | null {
 const cardErrors = new Map<string, string>()
 
 function renderCards() {
+  // Replacing the Merge button under the pointer never fires its mouseleave.
+  if (previewing) {
+    previewing = null
+    showMainDoc()
+  }
   const gutter = $('gutter')
   gutter.innerHTML = ''
   for (const s of sessions) {
@@ -131,6 +167,12 @@ function renderCards() {
     card.querySelector('.card-prompt')!.textContent = s.prompt
     const err = cardErrors.get(s.id)
     if (err) showCardError(card, err)
+    const merge = card.querySelector<HTMLElement>('[data-act="merge"]')!
+    merge.onmouseenter = () => showWorktreeDoc(s)
+    merge.onmouseleave = () => {
+      previewing = null
+      showMainDoc()
+    }
     card.onclick = (e) => {
       const act = (e.target as HTMLElement).dataset.act
       if (act === 'open') openTerminal(s)
