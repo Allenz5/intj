@@ -9,8 +9,6 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import pty, { type IPty } from 'node-pty'
 
 const projectDir = path.resolve(process.argv[2] ?? process.cwd())
-const docName = 'README.md'
-const docPath = path.join(projectDir, docName)
 // The agent is just a command run in a terminal, so any CLI agent can be swapped in.
 const agent = process.env.INTJ_AGENT ?? 'claude'
 const port = Number(process.env.PORT ?? 5173)
@@ -189,9 +187,13 @@ const sendJson = (res: http.ServerResponse, status: number, data: unknown) => {
 const errorText = (e: any) => (e.stderr?.toString() || e.stdout?.toString() || e.message || String(e)).trim()
 
 server.on('request', async (req, res) => {
-  const url = req.url ?? ''
+  const { pathname: url, searchParams } = new URL(req.url ?? '', 'http://localhost')
   if (!url.startsWith('/api/')) return vite.middlewares(req, res)
   try {
+    const docName = searchParams.get('name') ?? ''
+    if (req.method === 'GET' && url === '/api/doc') {
+      return sendJson(res, 200, { text: readDoc(docFile(projectDir, docName)) })
+    }
     if (req.method === 'POST' && url === '/api/sessions') {
       const { quote, prompt, skill } = await readBody(req)
       return sendJson(res, 200, publicSession(startSession(quote, prompt, skill)))
@@ -205,7 +207,7 @@ server.on('request', async (req, res) => {
     const ds = d && sessions.get(d[1])
     if (req.method === 'GET' && ds) {
       // The worktree's current file, uncommitted edits included, since merge commits them.
-      return sendJson(res, 200, { text: readDoc(path.join(ds.worktree, docName)) })
+      return sendJson(res, 200, { text: readDoc(docFile(ds.worktree, docName)) })
     }
     const m = url.match(/^\/api\/sessions\/(\w+)\/(merge|end)$/)
     const s = m && sessions.get(m[1])
@@ -231,7 +233,14 @@ server.on('request', async (req, res) => {
 
 // ---- WebSockets ----
 
-const readDoc = (file = docPath) => {
+// A doc's path under root, refusing names that escape it.
+const docFile = (root: string, name: string) => {
+  const file = path.resolve(root, name)
+  if (!file.startsWith(root + path.sep)) throw new Error(`invalid doc: ${name}`)
+  return file
+}
+
+const readDoc = (file: string) => {
   try {
     return fs.readFileSync(file, 'utf8')
   } catch {
@@ -239,25 +248,25 @@ const readDoc = (file = docPath) => {
   }
 }
 
-let lastText = readDoc()
+const lastText = new Map<string, string>()
 const eventClients = new Set<WebSocket>()
 function broadcast(msg: unknown) {
   for (const ws of eventClients) ws.send(JSON.stringify(msg))
 }
 
 // Watch the directory, not the file: editors (and agents) often save by rename, which breaks a file watch.
-fs.watch(projectDir, (_event, name) => {
-  if (name !== docName) return
-  const text = readDoc()
-  if (text === lastText) return
-  lastText = text
-  broadcast({ type: 'content', text })
+// Any doc can be open, so watch every md file outside worktrees and dependencies.
+fs.watch(projectDir, { recursive: true }, (_event, name) => {
+  if (!name?.endsWith('.md') || /^(\.intj|node_modules)\//.test(name)) return
+  const text = readDoc(path.join(projectDir, name))
+  if (text === lastText.get(name)) return
+  lastText.set(name, text)
+  broadcast({ type: 'content', name, text })
 })
 
 const eventsWss = new WebSocketServer({ noServer: true })
 eventsWss.on('connection', (ws) => {
   eventClients.add(ws)
-  ws.send(JSON.stringify({ type: 'content', name: docName, text: lastText }))
   ws.send(JSON.stringify({ type: 'sessions', list: [...sessions.values()].map(publicSession) }))
   ws.on('close', () => eventClients.delete(ws))
 })

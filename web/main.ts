@@ -8,6 +8,8 @@ type Session = { id: string; quote: string; prompt: string; branch: string; stat
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 const wsUrl = (p: string) => `ws://${location.host}${p}`
 
+const DEFAULT_DOC = 'README.md'
+let docName = ''
 let docText = ''
 let sessions: Session[] = []
 // Id of the session whose worktree doc is shown while its Merge button is hovered.
@@ -19,7 +21,7 @@ const events = new WebSocket(wsUrl('/events'))
 events.onmessage = (e) => {
   const msg = JSON.parse(e.data)
   if (msg.type === 'content') {
-    if (msg.name) $('doc-name').textContent = msg.name
+    if (msg.name !== docName) return
     docText = msg.text
     // A merge while hovering changes the main doc, so re-diff against it.
     const s = sessions.find((x) => x.id === previewing)
@@ -42,6 +44,32 @@ events.onmessage = (e) => {
   }
 }
 
+async function openDoc(name: string) {
+  docName = name
+  const { text } = await (await fetch(`/api/doc?name=${encodeURIComponent(name)}`)).json()
+  // Another link may have been clicked while fetching.
+  if (docName !== name) return
+  $('doc-name').textContent = name
+  docText = text
+  showMainDoc()
+  loadTree()
+}
+const docFromUrl = () => new URLSearchParams(location.search).get('doc') ?? DEFAULT_DOC
+window.onpopstate = () => openDoc(docFromUrl())
+openDoc(docFromUrl())
+
+// A relative link to an md file opens that doc in place, resolved against the current doc's folder.
+$('preview').addEventListener('click', (e) => {
+  const href = (e.target as HTMLElement).closest('a')?.getAttribute('href')
+  if (!href || /^([a-z]+:|\/|#)/i.test(href)) return
+  const file = href.split('#')[0]
+  if (!file.endsWith('.md')) return
+  e.preventDefault()
+  const name = decodeURIComponent(new URL(file, `http://x/${docName}`).pathname.slice(1))
+  history.pushState(null, '', `?doc=${encodeURIComponent(name)}`)
+  openDoc(name)
+})
+
 function showMainDoc() {
   $('preview').innerHTML = marked.parse(docText) as string
   layoutCards()
@@ -50,7 +78,7 @@ function showMainDoc() {
 // Show a session's worktree doc, marking blocks whose text isn't in the main doc.
 async function showWorktreeDoc(s: Session) {
   previewing = s.id
-  const { text } = await (await fetch(`/api/sessions/${s.id}/doc`)).json()
+  const { text } = await (await fetch(`/api/sessions/${s.id}/doc?name=${encodeURIComponent(docName)}`)).json()
   // The pointer may have left (or moved to another card) while fetching.
   if (previewing !== s.id) return
   const main = document.createElement('div')
