@@ -3,7 +3,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { createServer as createVite } from 'vite'
 import { WebSocketServer, type WebSocket } from 'ws'
@@ -18,26 +19,30 @@ let workloadDir = ''
 // The workload's path from the repo root, which is also where its docs sit in each worktree.
 let workloadRel = ''
 // The agent is just a command run in a terminal, so any CLI agent can be swapped in.
-const agent = process.env.INTJ_AGENT ?? 'claude'
+// Mutable so the picker can set it before the main terminal starts.
+let agentCmd = process.env.INTJ_AGENT ?? 'claude'
 const port = Number(process.env.PORT ?? 5173)
 
-const git = (args: string[], cwd = projectDir, env = process.env) =>
-  execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe', env })
+// Git runs off the event loop: on a large repo a status/worktree call takes seconds, and a
+// synchronous call would freeze the whole server (every request would hang) while it ran.
+const execFileP = promisify(execFile)
+const git = async (args: string[], cwd = projectDir, env = process.env) =>
+  (await execFileP('git', args, { cwd, encoding: 'utf8', env, maxBuffer: 256 * 1024 * 1024 })).stdout
 
 // ---- Project and workload ----
 
 const WORKLOAD = /^\d{8}-\d{4}-[0-9a-f-]{36}$/
 
-function openProject(dir: string) {
+async function openProject(dir: string) {
   projectDir = fs.realpathSync(dir)
   try {
-    git(['rev-parse', '--git-dir'])
+    await git(['rev-parse', '--git-dir'])
   } catch {
-    git(['init'])
+    await git(['init'])
   }
   // Workload docs are tracked so every worktree has them; keep only worktrees out of the main repo's
   // status, without touching tracked files.
-  const excludeFile = path.resolve(projectDir, git(['rev-parse', '--git-dir']).trim(), 'info', 'exclude')
+  const excludeFile = path.resolve(projectDir, (await git(['rev-parse', '--git-dir'])).trim(), 'info', 'exclude')
   // Older versions excluded all of .intj/, which would hide the docs; keep excluding just the worktrees there.
   let text = readDoc(excludeFile).replace(/^\.intj\/$/m, '.intj/worktrees/')
   if (!/^\.intj\/\*\/worktrees\/$/m.test(text)) text += '\n.intj/*/worktrees/\n'
@@ -54,7 +59,7 @@ function listWorkloads() {
 }
 
 // Open a workload, or create one when no id is given.
-function openWorkload(id?: string) {
+async function openWorkload(id?: string) {
   if (!id) {
     const d = new Date()
     const p = (n: number) => String(n).padStart(2, '0')
@@ -67,21 +72,43 @@ function openWorkload(id?: string) {
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'main.md'), `# ${path.basename(projectDir)}\n`)
     // Commit the new doc so sessions' worktrees start with it, leaving anything the user staged alone.
-    git(['add', '--', dir])
-    git(['commit', '-m', `intj: create workload ${id}`, '--', dir])
+    await git(['add', '--', dir])
+    await git(['commit', '-m', `intj: create workload ${id}`, '--', dir])
   }
   workloadDir = dir
-  workloadRel = path.relative(git(['rev-parse', '--show-toplevel']).trim(), dir)
+  workloadRel = path.relative((await git(['rev-parse', '--show-toplevel'])).trim(), dir)
   watchDocs()
+}
+
+// Delete a workload: end its sessions (dropping their worktrees/branches), then remove its folder.
+async function deleteWorkload(id: string) {
+  if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
+  const dir = path.join(projectDir, '.intj', id)
+  for (const s of [...sessions.values()]) {
+    if (s.worktree.startsWith(dir + path.sep)) await endSession(s)
+  }
+  fs.rmSync(dir, { recursive: true, force: true })
+  // Record the (tracked) docs' removal so worktrees no longer carry them; prune any stale registration.
+  await git(['add', '--', dir])
+  if ((await git(['status', '--porcelain', '--', dir])).trim()) {
+    await git(['commit', '-m', `intj: delete workload ${id}`, '--', dir])
+  }
+  await git(['worktree', 'prune'])
+  if (workloadDir === dir) {
+    workloadDir = ''
+    workloadRel = ''
+  }
+  return listWorkloads()
 }
 
 // ---- Agent terminals ----
 
 type AgentTerm = {
-  status: 'running' | 'exited'
+  // 'creating' while a session's worktree is still being built, before its pty exists.
+  status: 'creating' | 'running' | 'exited'
   // Whether the agent is working on a turn, as opposed to waiting for input.
   busy: boolean
-  term: IPty
+  term: IPty | null
   buffer: string
   clients: Set<WebSocket>
 }
@@ -89,7 +116,11 @@ const MAX_BUFFER = 500_000
 // Claude Code reports its state in the terminal title: a spinning glyph while working, ✳ when waiting.
 const TITLE = /\x1b\]0;([^\x07]*)\x07/g
 
-function spawnAgent(cwd: string, command: string, env: Record<string, string> = {}): AgentTerm {
+const newTerm = (): AgentTerm => ({ status: 'creating', busy: true, term: null, buffer: '', clients: new Set() })
+
+// Start the pty for a term object; its callbacks update that same object in place, so a session
+// created earlier (in the 'creating' state) simply gets its terminal filled in here.
+function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<string, string> = {}) {
   const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', command], {
     name: 'xterm-256color',
     cwd,
@@ -97,7 +128,9 @@ function spawnAgent(cwd: string, command: string, env: Record<string, string> = 
     rows: 30,
     env: { ...process.env, COLORTERM: 'truecolor', ...env },
   })
-  const t: AgentTerm = { status: 'running', busy: true, term, buffer: '', clients: new Set() }
+  t.term = term
+  t.status = 'running'
+  t.busy = true
   // It titles itself ✳ while booting, before it picks up the first prompt; ignore that one.
   let working = false
   const setBusy = (busy: boolean) => {
@@ -106,7 +139,13 @@ function spawnAgent(cwd: string, command: string, env: Record<string, string> = 
     // Sessions extend this object, so an id means this terminal is a session's.
     const id = (t as Partial<Session>).id
     // An ended session's worktree is gone, so skip its late output.
-    if (id) sessions.has(id) && broadcast({ type: 'activity', id, busy, unmerged: hasUnmerged(t as Session) })
+    if (id) {
+      if (sessions.has(id)) {
+        broadcast({ type: 'activity', id, busy, unmerged: unmergedCache.get(id) ?? false })
+        // Recompute the merge state off the event loop rather than blocking on git here.
+        refreshUnmerged(t as Session)
+      }
+    }
     // The main terminal may have just merged a handed-off session.
     else if (!busy) broadcastSessions()
   }
@@ -128,10 +167,13 @@ function spawnAgent(cwd: string, command: string, env: Record<string, string> = 
   return t
 }
 
+const spawnAgent = (cwd: string, command: string, env: Record<string, string> = {}) =>
+  startTerm(newTerm(), cwd, command, env)
+
 // The default terminal: a plain agent session on the main checkout, restarted if it has exited.
 let mainTerm: AgentTerm | null = null
 const getMainTerm = () => {
-  if (mainTerm?.status !== 'running') mainTerm = spawnAgent(projectDir, agent)
+  if (mainTerm?.status !== 'running') mainTerm = spawnAgent(projectDir, agentCmd)
   return mainTerm
 }
 
@@ -155,26 +197,47 @@ type Session = AgentTerm & {
 type Anchor = Pick<Session, 'quote' | 'prefix' | 'suffix' | 'pos'>
 const sessions = new Map<string, Session>()
 
-// Whether the worktree has anything main doesn't: uncommitted edits or commits not merged yet.
-const hasUnmerged = (s: Session) =>
-  !!git(['status', '--porcelain'], s.worktree).trim() || git(['rev-list', '--count', `HEAD..${s.branch}`]).trim() !== '0'
+// Whether the worktree has anything main doesn't (uncommitted edits or unmerged commits), cached so
+// broadcasts stay synchronous. Recomputed off the event loop, debounced, since git status on a large
+// repo is slow; the card updates when the value actually changes.
+const unmergedCache = new Map<string, boolean>()
+const unmergedTimers = new Map<string, ReturnType<typeof setTimeout>>()
+function refreshUnmerged(s: Session) {
+  if (s.status === 'creating') return
+  clearTimeout(unmergedTimers.get(s.id))
+  unmergedTimers.set(
+    s.id,
+    setTimeout(async () => {
+      unmergedTimers.delete(s.id)
+      try {
+        const dirty = (await git(['status', '--porcelain'], s.worktree)).trim() !== ''
+        const ahead = (await git(['rev-list', '--count', `HEAD..${s.branch}`])).trim() !== '0'
+        const val = dirty || ahead
+        if (sessions.has(s.id) && unmergedCache.get(s.id) !== val) {
+          unmergedCache.set(s.id, val)
+          broadcast({ type: 'activity', id: s.id, busy: s.busy, unmerged: val })
+        }
+      } catch {}
+    }, 400),
+  )
+}
 
 const publicSession = (s: Session) => {
   const { id, doc, quote, prefix, suffix, pos, prompt, branch, status, busy } = s
-  return { id, doc, quote, prefix, suffix, pos, prompt, branch, status, busy, unmerged: hasUnmerged(s) }
+  return { id, doc, quote, prefix, suffix, pos, prompt, branch, status, busy, unmerged: unmergedCache.get(id) ?? false }
 }
 const broadcastSessions = () => broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
 
 // A commit of the worktree as it is now, uncommitted and untracked files included, leaving its index alone.
-function snapshot(s: Session) {
+async function snapshot(s: Session) {
   const index = path.join(os.tmpdir(), `intj-index-${crypto.randomUUID()}`)
   const env = { ...process.env, GIT_INDEX_FILE: index }
   try {
-    git(['add', '-A'], s.worktree, env)
-    const tree = git(['write-tree'], s.worktree, env).trim()
-    const head = git(['rev-parse', 'HEAD'], s.worktree).trim()
-    if (tree === git(['rev-parse', 'HEAD^{tree}'], s.worktree).trim()) return head
-    return git(['commit-tree', tree, '-p', head, '-m', `intj ${s.id}: snapshot for fork`], s.worktree).trim()
+    await git(['add', '-A'], s.worktree, env)
+    const tree = (await git(['write-tree'], s.worktree, env)).trim()
+    const head = (await git(['rev-parse', 'HEAD'], s.worktree)).trim()
+    if (tree === (await git(['rev-parse', 'HEAD^{tree}'], s.worktree)).trim()) return head
+    return (await git(['commit-tree', tree, '-p', head, '-m', `intj ${s.id}: snapshot for fork`], s.worktree)).trim()
   } finally {
     fs.rmSync(index, { force: true })
   }
@@ -183,44 +246,58 @@ function snapshot(s: Session) {
 // With a skill, the prompt becomes the skill's optional argument and leads the message,
 // since the agent only recognizes a slash command at the start.
 // With `from`, the session starts from that session's files and conversation as they are now.
+// The card is shown at once in a 'creating' state; the worktree is built and the agent started
+// off the event loop, so a slow repo doesn't block the request or freeze the server.
 function startSession(doc: string, anchor: Anchor, prompt: string, skill?: string, from?: Session) {
   const { quote } = anchor
   const id = crypto.randomBytes(3).toString('hex')
   const branch = `intj/${id}`
   const worktree = path.join(workloadDir, 'worktrees', id)
-  git(['worktree', 'add', '-b', branch, worktree, ...(from ? [snapshot(from)] : [])])
-
-  const quoted = quote ? quote.split('\n').map((l) => `> ${l}`).join('\n') + '\n\n' : ''
-  // The doc's copy in this session's worktree, which is the one the agent should update.
-  const file = path.join(worktree, workloadRel, doc)
-  const context =
-    `Doc: ${file}\n\n${quoted && `Selected text:\n${quoted}`}${prompt && `Comment: ${prompt}\n\n`}` +
-    `When done, update the markdown docs in ${path.dirname(file)}.`
-  // Pass the prompt through the environment to avoid shell quoting issues.
-  if (skill) prompt = `/intj:${skill} ${prompt}`.trim()
-  let text = skill ? `${prompt}\n\n${context}` : context
-  // The forked conversation names the old worktree's paths, so point the agent at its own copy.
-  if (from) text = `(Forked: you now work in ${worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
   const chat = crypto.randomUUID()
-  const resume = from ? `--resume ${from.chat} --fork-session ` : ''
-  const t = spawnAgent(worktree, `${agent} ${resume}--session-id ${chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
-  // Extend the same object: its pty callbacks update buffer and status in place.
-  const s: Session = Object.assign(t, { id, doc, ...anchor, prompt, branch, worktree, chat })
+  // For a skill the message leads with the slash command; this is also what the card shows.
+  const cmd = skill ? `/intj:${skill} ${prompt}`.trim() : prompt
+  const s: Session = Object.assign(newTerm(), { id, doc, ...anchor, prompt: cmd, branch, worktree, chat })
   sessions.set(id, s)
   broadcastSessions()
+
+  ;(async () => {
+    try {
+      const base = from ? [await snapshot(from)] : []
+      await git(['worktree', 'add', '-b', branch, worktree, ...base])
+      const quoted = quote ? quote.split('\n').map((l) => `> ${l}`).join('\n') + '\n\n' : ''
+      // The doc's copy in this session's worktree, which is the one the agent should update.
+      const file = path.join(worktree, workloadRel, doc)
+      const context =
+        `Doc: ${file}\n\n${quoted && `Selected text:\n${quoted}`}${prompt && `Comment: ${prompt}\n\n`}` +
+        `When done, update the markdown docs in ${path.dirname(file)}.`
+      let text = skill ? `${cmd}\n\n${context}` : context
+      // The forked conversation names the old worktree's paths, so point the agent at its own copy.
+      if (from) text = `(Forked: you now work in ${worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
+      const resume = from ? `--resume ${from.chat} --fork-session ` : ''
+      // Pass the prompt through the environment to avoid shell quoting issues.
+      startTerm(s, worktree, `${agentCmd} ${resume}--session-id ${chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+      broadcastSessions()
+    } catch (e) {
+      // Building the worktree failed: drop the placeholder card and report it.
+      sessions.delete(id)
+      unmergedCache.delete(id)
+      broadcastSessions()
+      broadcast({ type: 'session-error', id, error: errorText(e) })
+    }
+  })()
   return s
 }
 
-function mergeSession(s: Session) {
-  git(['add', '-A'], s.worktree)
-  if (git(['status', '--porcelain'], s.worktree).trim()) {
-    git(['commit', '-m', `intj ${s.id}: ${s.prompt.split('\n')[0]}`], s.worktree)
+async function mergeSession(s: Session) {
+  await git(['add', '-A'], s.worktree)
+  if ((await git(['status', '--porcelain'], s.worktree)).trim()) {
+    await git(['commit', '-m', `intj ${s.id}: ${s.prompt.split('\n')[0]}`], s.worktree)
   }
   try {
-    git(['merge', '--no-edit', s.branch])
+    await git(['merge', '--no-edit', s.branch])
   } catch (e) {
     try {
-      git(['merge', '--abort'])
+      await git(['merge', '--abort'])
     } catch {}
     throw e
   }
@@ -231,20 +308,26 @@ function mergeSession(s: Session) {
 function handOffMerge(s: Session) {
   const text = `/intj:merge-worktree ${s.branch}`
   if (mainTerm?.status === 'running') {
-    mainTerm.term.write(text)
+    mainTerm.term!.write(text)
     // Send Enter separately so the TUI doesn't treat it as part of a paste.
-    setTimeout(() => mainTerm?.term.write('\r'), 300)
+    setTimeout(() => mainTerm?.term?.write('\r'), 300)
   } else {
-    mainTerm = spawnAgent(projectDir, `${agent} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+    mainTerm = spawnAgent(projectDir, `${agentCmd} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
   }
 }
 
-function endSession(s: Session) {
-  s.term.kill()
+async function endSession(s: Session) {
+  s.term?.kill()
   for (const ws of s.clients) ws.close()
-  git(['worktree', 'remove', '--force', s.worktree])
-  git(['branch', '-D', s.branch])
+  // The worktree may not exist yet if the session is still being created.
+  try {
+    await git(['worktree', 'remove', '--force', s.worktree])
+  } catch {}
+  try {
+    await git(['branch', '-D', s.branch])
+  } catch {}
   sessions.delete(s.id)
+  unmergedCache.delete(s.id)
   broadcastSessions()
 }
 
@@ -277,7 +360,12 @@ server.on('request', async (req, res) => {
   try {
     const docName = searchParams.get('name') ?? ''
     if (req.method === 'GET' && url === '/api/state') {
-      return sendJson(res, 200, { workload: workloadDir && path.basename(workloadDir) })
+      return sendJson(res, 200, { workload: workloadDir && path.basename(workloadDir), agent: agentCmd })
+    }
+    if (req.method === 'POST' && url === '/api/agent') {
+      const { command } = await readBody(req)
+      agentCmd = String(command ?? '').trim() || 'claude'
+      return sendJson(res, 200, { agent: agentCmd })
     }
     if (req.method === 'GET' && url === '/api/dirs') {
       const dir = path.resolve(searchParams.get('path') || startDir)
@@ -290,13 +378,18 @@ server.on('request', async (req, res) => {
     }
     if (req.method === 'POST' && url === '/api/project') {
       const { path: dir } = await readBody(req)
-      const workloads = openProject(dir)
+      const workloads = await openProject(dir)
       return sendJson(res, 200, { project: projectDir, workloads })
     }
     if (req.method === 'POST' && url === '/api/workload') {
       const { id } = await readBody(req)
-      openWorkload(id)
+      await openWorkload(id)
       return sendJson(res, 200, { ok: true })
+    }
+    if (req.method === 'POST' && url === '/api/workload/delete') {
+      const { id } = await readBody(req)
+      const workloads = await deleteWorkload(id)
+      return sendJson(res, 200, { workloads })
     }
     if (req.method === 'GET' && url === '/api/doc') {
       return sendJson(res, 200, { text: readDoc(docFile(workloadDir, docName)) })
@@ -309,11 +402,11 @@ server.on('request', async (req, res) => {
     }
     if (req.method === 'GET' && url === '/api/tree') {
       // Tracked plus untracked-but-not-ignored files, so the tree follows .gitignore.
-      const files = git(['ls-files', '--cached', '--others', '--exclude-standard']).split('\n').filter(Boolean)
+      const files = (await git(['ls-files', '--cached', '--others', '--exclude-standard'])).split('\n').filter(Boolean)
       return sendJson(res, 200, { files })
     }
     if (req.method === 'GET' && url === '/api/parent') {
-      return sendJson(res, 200, { parent: findParent(docName) })
+      return sendJson(res, 200, { parent: await findParent(docName) })
     }
     const d = url.match(/^\/api\/sessions\/(\w+)\/doc$/)
     const ds = d && sessions.get(d[1])
@@ -325,11 +418,12 @@ server.on('request', async (req, res) => {
     const s = m && sessions.get(m[1])
     if (req.method === 'POST' && s) {
       if (m[2] === 'end') {
-        endSession(s)
+        await endSession(s)
         return sendJson(res, 200, { ok: true })
       }
       try {
-        mergeSession(s)
+        await mergeSession(s)
+        refreshUnmerged(s)
         broadcastSessions()
         return sendJson(res, 200, { ok: true })
       } catch (e) {
@@ -353,9 +447,9 @@ const docFile = (root: string, name: string) => {
 }
 
 // Docs form a tree through links, so a doc's parent is the md file that links to it.
-function findParent(name: string) {
+async function findParent(name: string) {
   // Run in the workload folder, git lists paths relative to it.
-  const files = git(['ls-files', '--cached', '--others', '--exclude-standard'], workloadDir).split('\n')
+  const files = (await git(['ls-files', '--cached', '--others', '--exclude-standard'], workloadDir)).split('\n')
   for (const f of files) {
     if (!f.endsWith('.md') || f === name) continue
     for (const [, href] of readDoc(path.join(workloadDir, f)).matchAll(/\]\(([^)\s]+)/g)) {
@@ -404,7 +498,7 @@ ptyWss.on('connection', (ws, s: AgentTerm) => {
   s.clients.add(ws)
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw.toString())
-    if (s.status !== 'running') return
+    if (s.status !== 'running' || !s.term) return
     if (msg.type === 'input') s.term.write(msg.data)
     else if (msg.type === 'resize') s.term.resize(msg.cols, msg.rows)
   })

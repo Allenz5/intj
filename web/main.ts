@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 
 // Where a comment sits: its quote plus the text around it (whitespace removed) and its relative position.
 type Anchor = { quote: string; prefix: string; suffix: string; pos: number }
-type Session = Anchor & { id: string; doc: string; prompt: string; branch: string; status: 'running' | 'exited'; busy: boolean; unmerged: boolean }
+type Session = Anchor & { id: string; doc: string; prompt: string; branch: string; status: 'creating' | 'running' | 'exited'; busy: boolean; unmerged: boolean }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 const wsUrl = (p: string) => `ws://${location.host}${p}`
@@ -42,6 +42,11 @@ const onEvent = (e: MessageEvent) => {
       s.unmerged = msg.unmerged
       renderState(card, s)
     }
+    // The pty starts at a default size; once it's live, fit it to its pane.
+    const t = activeId && terms.get(activeId)
+    if (t) sendResize(t)
+  } else if (msg.type === 'session-error') {
+    alert(msg.error)
   }
 }
 
@@ -279,10 +284,10 @@ function renderCards() {
 }
 
 function renderState(card: HTMLElement, s: Session) {
-  const state = s.status === 'exited' ? 'exited' : s.busy ? 'busy' : 'done'
+  const state = s.status === 'creating' ? 'creating' : s.status === 'exited' ? 'exited' : s.busy ? 'busy' : 'done'
   const el = card.querySelector<HTMLElement>('.card-state')!
   el.className = `card-state ${state}`
-  el.textContent = { busy: 'Working', done: 'Done', exited: 'Exited' }[state]
+  el.textContent = { creating: 'Creating worktree…', busy: 'Working', done: 'Done', exited: 'Exited' }[state]
   // Merge only shows while the worktree has something main doesn't.
   card.querySelector<HTMLElement>('[data-act="merge"]')!.hidden = !s.unmerged
   // A button hidden under the pointer never fires its mouseleave.
@@ -511,6 +516,30 @@ new ResizeObserver(() => {
   if (t) sendResize(t)
 }).observe($('terms'))
 
+// ---- Agent command ----
+
+// The bash command that starts each agent, set on the picker before the terminals start; default 'claude'.
+let agentCmd = 'claude'
+const pickerAgentInput = $<HTMLInputElement>('picker-agent-cmd')
+
+async function setAgent(command: string) {
+  const res = await fetch('/api/agent', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ command }),
+  })
+  const data = await res.json()
+  if (!res.ok) return alert(data.error)
+  // Reflect the server's normalized value (empty falls back to 'claude').
+  agentCmd = data.agent
+  pickerAgentInput.value = data.agent
+}
+const savePickerAgent = () => setAgent(pickerAgentInput.value)
+pickerAgentInput.onchange = savePickerAgent
+pickerAgentInput.onkeydown = (e) => {
+  if (e.key === 'Enter' && !e.isComposing) savePickerAgent()
+}
+
 // ---- Divider ----
 
 $('divider').onpointerdown = (e) => {
@@ -562,9 +591,25 @@ async function chooseProject(dir: string) {
       const li = document.createElement('li')
       // Ids start with yyyymmdd-hhmm.
       const [, y, mo, d, h, mi] = w.id.match(/^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)/)!
-      li.textContent = `${y}-${mo}-${d} ${h}:${mi}  ${w.title}`
+      const label = document.createElement('span')
+      label.textContent = `${y}-${mo}-${d} ${h}:${mi}  ${w.title}`
+      li.append(label)
       li.title = w.id
       li.onclick = () => chooseWorkload(w.id)
+      const del = document.createElement('button')
+      del.className = 'workload-del'
+      del.textContent = '×'
+      del.title = 'Delete workload'
+      del.onclick = async (e) => {
+        // Don't also open the workload.
+        e.stopPropagation()
+        if (!confirm('Delete this workload? Its docs and any sessions will be removed.')) return
+        const res = await post('/api/workload/delete', { id: w.id })
+        const out = await res.json()
+        if (!res.ok) return alert(out.error)
+        li.remove()
+      }
+      li.append(del)
       return li
     }),
   )
@@ -589,7 +634,9 @@ function start() {
 // A reload after choosing goes straight back to the workload.
 fetch('/api/state')
   .then((r) => r.json())
-  .then(({ workload }) => {
+  .then(({ workload, agent }) => {
+    agentCmd = agent ?? 'claude'
+    pickerAgentInput.value = agentCmd
     if (workload) return start()
     $('picker').hidden = false
     showDir('')
