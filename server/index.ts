@@ -51,13 +51,15 @@ function startSession(quote: string, prompt: string) {
   const worktree = path.join(worktreeRoot, id)
   git(['worktree', 'add', '-b', branch, worktree])
 
+  // Quote the selection as context only; naming the doc made agents think they should edit it.
+  const quoted = quote ? quote.split('\n').map((l) => `> ${l}`).join('\n') + '\n\n' : ''
   // Pass the prompt through the environment to avoid shell quoting issues.
   const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', `${agent} "$INTJ_PROMPT"`], {
     name: 'xterm-256color',
     cwd: worktree,
     cols: 100,
     rows: 30,
-    env: { ...process.env, COLORTERM: 'truecolor', INTJ_PROMPT: prompt },
+    env: { ...process.env, COLORTERM: 'truecolor', INTJ_PROMPT: quoted + prompt },
   })
   const s: Session = { id, quote, prompt, branch, worktree, status: 'running', term, buffer: '', clients: new Set() }
   term.onData((data) => {
