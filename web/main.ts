@@ -256,17 +256,17 @@ async function runAction(s: Session, act: 'merge' | 'end', card: HTMLElement) {
   cardErrors.set(s.id, res.ok ? '' : data.error)
   const ok = res.ok && !data.handedOff
   const base = data.handedOff
-    ? 'Auto-merge failed; handed to the main terminal to merge with the merge skill'
+    ? "Conflicts handed to this session's agent to resolve in its worktree; Merge again once it's done"
     : ok
       ? act === 'merge'
         ? 'Merged'
         : ''
       : data.error
-  // Docs merge outside git; note any that came back with conflict markers to resolve.
-  const conflicts = data.docConflicts?.length ? `${base ? '; ' : ''}文档冲突: ${data.docConflicts.join(', ')}(已写入标记)` : ''
+  // Docs merge outside git; note any that conflicted.
+  const conflicts = data.docConflicts?.length ? `${base ? '; ' : ''}文档冲突: ${data.docConflicts.join(', ')}` : ''
   showCardError(card, base + conflicts)
   card.querySelector('.card-error')!.classList.toggle('ok', ok && !data.docConflicts?.length)
-  if (data.handedOff) openTerminal(mainTerm)
+  if (data.handedOff) openTerminal(s)
   if (ok && act === 'end') closeTerminal(s.id)
 }
 

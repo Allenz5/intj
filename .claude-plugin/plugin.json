@@ -1,5 +1,5 @@
 {
   "name": "intj",
   "version": "0.1.0",
-  "description": "Skills for intj, a markdown-doc-driven AI coding workbench: update docs, open a worktree, merge worktrees, split a doc."
+  "description": "Skills for intj, a markdown-doc-driven AI coding workbench: update docs, open a worktree, resolve doc merge conflicts, split a doc."
 }
