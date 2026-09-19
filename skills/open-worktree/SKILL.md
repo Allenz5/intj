@@ -11,7 +11,7 @@ In intj, one AI session is one git worktree. This skill creates the worktree; th
 
 1. **Locate the main checkout.** Run `git rev-parse --path-format=absolute --git-common-dir` and take its parent directory as `<root>`. All worktrees live under `<root>/.intj/worktrees/`, even when this skill runs inside another worktree.
 
-2. **Keep `.intj/` out of git.** If `<root>/.git/info/exclude` does not already contain the line `.intj/`, append it. Do not edit `.gitignore`.
+2. **Keep worktrees out of git.** Workload docs under `.intj/<workload>/` are tracked, so exclude only worktrees: make sure `<root>/.git/info/exclude` contains the lines `.intj/worktrees/` and `.intj/*/worktrees/`, and no line `.intj/`. Do not edit `.gitignore`.
 
 3. **Pick the base.** Default to the current `HEAD`. Use a different branch or commit if the user names one.
 

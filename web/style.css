@@ -255,3 +255,56 @@ button:hover {
 #preview .diff {
   background: #e3f4e6;
 }
+#picker {
+  display: flex;
+  justify-content: center;
+  height: 100%;
+  padding-top: 10vh;
+  background: #f8f9fa;
+}
+#picker-box {
+  width: 520px;
+  height: fit-content;
+  padding: 16px 20px 20px;
+  background: #fff;
+  border: 1px solid #e3e5e8;
+  border-radius: 8px;
+}
+#picker h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+#dir-path,
+#workload-project {
+  margin-bottom: 8px;
+  color: #6b7380;
+  font-family: Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+#dir-list,
+#workload-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow: auto;
+  border: 1px solid #e3e5e8;
+  border-radius: 4px;
+}
+#dir-list:empty,
+#workload-list:empty {
+  display: none;
+}
+#dir-list li,
+#workload-list li {
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#dir-list li:hover,
+#workload-list li:hover {
+  background: #eef2f8;
+}

@@ -19,8 +19,7 @@ let previewing: string | null = null
 
 // ---- Document ----
 
-const events = new WebSocket(wsUrl('/events'))
-events.onmessage = (e) => {
+const onEvent = (e: MessageEvent) => {
   const msg = JSON.parse(e.data)
   if (msg.type === 'content') {
     if (msg.name !== docName) return
@@ -68,7 +67,6 @@ function goToDoc(name: string) {
 }
 const docFromUrl = () => new URLSearchParams(location.search).get('doc') ?? DEFAULT_DOC
 window.onpopstate = () => openDoc(docFromUrl())
-openDoc(docFromUrl())
 
 // A relative link to an md file opens that doc in place, resolved against the current doc's folder.
 $('preview').addEventListener('click', (e) => {
@@ -480,7 +478,6 @@ function closeTerminal(id: string) {
 }
 
 $('panel-close').onclick = () => openTerminal(mainTerm)
-openTerminal(mainTerm)
 
 new ResizeObserver(() => {
   const t = activeId && terms.get(activeId)
@@ -502,3 +499,71 @@ $('divider').onpointerdown = (e) => {
     layoutCards()
   }
 }
+
+// ---- Picker: choose a project folder, then a workload in it ----
+
+const post = (url: string, body: unknown) =>
+  fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+
+async function showDir(dir: string) {
+  const res = await fetch(`/api/dirs?path=${encodeURIComponent(dir)}`)
+  const data = await res.json()
+  if (!res.ok) return alert(data.error)
+  $('dir-path').textContent = data.path
+  const entries: [string, string][] = data.dirs.map((d: string) => [d, `${data.path}/${d}`])
+  if (data.parent !== data.path) entries.unshift(['..', data.parent])
+  $('dir-list').replaceChildren(
+    ...entries.map(([name, to]) => {
+      const li = document.createElement('li')
+      li.textContent = name
+      li.onclick = () => showDir(to)
+      return li
+    }),
+  )
+  $('dir-choose').onclick = () => chooseProject(data.path)
+}
+
+async function chooseProject(dir: string) {
+  const res = await post('/api/project', { path: dir })
+  const data = await res.json()
+  if (!res.ok) return alert(data.error)
+  $('pick-folder').hidden = true
+  $('pick-workload').hidden = false
+  $('workload-project').textContent = data.project
+  $('workload-list').replaceChildren(
+    ...data.workloads.map((w: { id: string; title: string }) => {
+      const li = document.createElement('li')
+      // Ids start with yyyymmdd-hhmm.
+      const [, y, mo, d, h, mi] = w.id.match(/^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)/)!
+      li.textContent = `${y}-${mo}-${d} ${h}:${mi}  ${w.title}`
+      li.title = w.id
+      li.onclick = () => chooseWorkload(w.id)
+      return li
+    }),
+  )
+}
+
+async function chooseWorkload(id?: string) {
+  const res = await post('/api/workload', { id })
+  const data = await res.json()
+  if (!res.ok) return alert(data.error)
+  start()
+}
+$('workload-new').onclick = () => chooseWorkload()
+
+function start() {
+  $('picker').hidden = true
+  $('app').hidden = false
+  new WebSocket(wsUrl('/events')).onmessage = onEvent
+  openDoc(docFromUrl())
+  openTerminal(mainTerm)
+}
+
+// A reload after choosing goes straight back to the workload.
+fetch('/api/state')
+  .then((r) => r.json())
+  .then(({ workload }) => {
+    if (workload) return start()
+    $('picker').hidden = false
+    showDir('')
+  })
