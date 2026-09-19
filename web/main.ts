@@ -53,6 +53,15 @@ async function openDoc(name: string) {
   docText = text
   showMainDoc()
   loadTree()
+  const { parent } = await (await fetch(`/api/parent?name=${encodeURIComponent(name)}`)).json()
+  if (docName !== name) return
+  $('doc-up').hidden = !parent
+  $('doc-up').title = parent ?? ''
+  $('doc-up').onclick = () => goToDoc(parent)
+}
+function goToDoc(name: string) {
+  history.pushState(null, '', `?doc=${encodeURIComponent(name)}`)
+  openDoc(name)
 }
 const docFromUrl = () => new URLSearchParams(location.search).get('doc') ?? DEFAULT_DOC
 window.onpopstate = () => openDoc(docFromUrl())
@@ -65,9 +74,7 @@ $('preview').addEventListener('click', (e) => {
   const file = href.split('#')[0]
   if (!file.endsWith('.md')) return
   e.preventDefault()
-  const name = decodeURIComponent(new URL(file, `http://x/${docName}`).pathname.slice(1))
-  history.pushState(null, '', `?doc=${encodeURIComponent(name)}`)
-  openDoc(name)
+  goToDoc(decodeURIComponent(new URL(file, `http://x/${docName}`).pathname.slice(1)))
 })
 
 function showMainDoc() {

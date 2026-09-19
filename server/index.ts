@@ -203,6 +203,9 @@ server.on('request', async (req, res) => {
       const files = git(['ls-files', '--cached', '--others', '--exclude-standard']).split('\n').filter(Boolean)
       return sendJson(res, 200, { files })
     }
+    if (req.method === 'GET' && url === '/api/parent') {
+      return sendJson(res, 200, { parent: findParent(docName) })
+    }
     const d = url.match(/^\/api\/sessions\/(\w+)\/doc$/)
     const ds = d && sessions.get(d[1])
     if (req.method === 'GET' && ds) {
@@ -238,6 +241,19 @@ const docFile = (root: string, name: string) => {
   const file = path.resolve(root, name)
   if (!file.startsWith(root + path.sep)) throw new Error(`invalid doc: ${name}`)
   return file
+}
+
+// Docs form a tree through links, so a doc's parent is the md file that links to it.
+function findParent(name: string) {
+  const files = git(['ls-files', '--cached', '--others', '--exclude-standard']).split('\n')
+  for (const f of files) {
+    if (!f.endsWith('.md') || f === name) continue
+    for (const [, href] of readDoc(path.join(projectDir, f)).matchAll(/\]\(([^)\s]+)/g)) {
+      if (/^([a-z]+:|\/|#)/i.test(href)) continue
+      if (decodeURIComponent(path.posix.join(path.posix.dirname(f), href.split('#')[0])) === name) return f
+    }
+  }
+  return null
 }
 
 const readDoc = (file: string) => {
