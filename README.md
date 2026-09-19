@@ -21,6 +21,7 @@
 - **文档栏**：显示当前 md 文档，是界面的主体。
   - 选中一段文字后，弹出「添加 comment」和「开启子文档」两个按钮。
     - **开启子文档**：新建子文档（即添加子模块），并把选中的文字变成指向它的超链接。
+    - **Split doc**：在 Start chat 旁边。和 Start chat 一样开启新的 AI 会话，第一条消息调用 `intj:split-doc`，把选中的模块在当前文档里缩成简洁版本，详细内容移到新的子文档并用超链接连过去。输入框的内容可选，作为附加条件一起发出。
   - 在任意位置右键，弹出右键菜单。
     - **开启 AI 会话**：从当前文档开启新的 AI 会话。一个新的 AI 会话 = 一个新的 worktree。
   - 点击指向子文档的超链接，跳转到子文档。
@@ -49,6 +50,7 @@ intj 以插件 `intj` 的形式提供一个 skill 库，安装后 skill 自动�
 - `intj:update-docs`：更新文档，让 md 文档反映当前的工作状态。
 - `intj:open-worktree`：开 worktree，在 `.intj/worktrees/<id>` 下为新的 AI 会话创建分支 `intj/<id>`。
 - `intj:merge-worktree`：合并 worktree，把任意个会话分支合并到当前分支并提交，保留 worktree 和分支。
+- `intj:split-doc`：拆分文档，把一个模块在当前文档里缩成简洁版本，详细内容移到链接过去的子文档。可选参数是附加条件。
 
 安装到 Claude Code：
 

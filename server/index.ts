@@ -79,7 +79,9 @@ const sessions = new Map<string, Session>()
 const publicSession = ({ id, quote, prompt, branch, status }: Session) => ({ id, quote, prompt, branch, status })
 const broadcastSessions = () => broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
 
-function startSession(quote: string, prompt: string) {
+// With a skill, the prompt becomes the skill's optional argument and leads the message,
+// since the agent only recognizes a slash command at the start.
+function startSession(quote: string, prompt: string, skill?: string) {
   const id = crypto.randomBytes(3).toString('hex')
   const branch = `intj/${id}`
   const worktree = path.join(worktreeRoot, id)
@@ -88,7 +90,9 @@ function startSession(quote: string, prompt: string) {
   // Quote the selection as context only; naming the doc made agents think they should edit it.
   const quoted = quote ? quote.split('\n').map((l) => `> ${l}`).join('\n') + '\n\n' : ''
   // Pass the prompt through the environment to avoid shell quoting issues.
-  const t = spawnAgent(worktree, `${agent} "$INTJ_PROMPT"`, { INTJ_PROMPT: quoted + prompt })
+  if (skill) prompt = `/intj:${skill} ${prompt}`.trim()
+  const text = skill ? `${prompt}\n\n${quoted}` : quoted + prompt
+  const t = spawnAgent(worktree, `${agent} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
   // Extend the same object: its pty callbacks update buffer and status in place.
   const s: Session = Object.assign(t, { id, quote, prompt, branch, worktree })
   sessions.set(id, s)
@@ -161,8 +165,8 @@ server.on('request', async (req, res) => {
   if (!url.startsWith('/api/')) return vite.middlewares(req, res)
   try {
     if (req.method === 'POST' && url === '/api/sessions') {
-      const { quote, prompt } = await readBody(req)
-      return sendJson(res, 200, publicSession(startSession(quote, prompt)))
+      const { quote, prompt, skill } = await readBody(req)
+      return sendJson(res, 200, publicSession(startSession(quote, prompt, skill)))
     }
     if (req.method === 'GET' && url === '/api/tree') {
       // Tracked plus untracked-but-not-ignored files, so the tree follows .gitignore.

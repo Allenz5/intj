@@ -241,7 +241,7 @@ function showPopup(quote: string, range: Range | null, x: number, y: number) {
   pendingQuote = quote
   // Focusing the input clears the selection, so keep it visible as a highlight.
   if (range) CSS.highlights?.set('intj-pending', new Highlight(range))
-  popup.style.left = `${Math.min(x, window.innerWidth - 340)}px`
+  popup.style.left = `${Math.min(x, window.innerWidth - 420)}px`
   popup.style.top = `${y + 6}px`
   popup.hidden = false
   popupInput.value = ''
@@ -278,20 +278,22 @@ document.addEventListener('mousedown', (e) => {
   if (!popup.contains(e.target as Node)) hidePopup()
 })
 
-async function startChat() {
+// A skill makes the input optional: it becomes extra conditions for the skill.
+async function startChat(skill?: string) {
   const prompt = popupInput.value.trim()
-  if (!prompt) return popupInput.focus()
+  if (!prompt && !skill) return popupInput.focus()
   hidePopup()
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ quote: pendingQuote, prompt }),
+    body: JSON.stringify({ quote: pendingQuote, prompt, skill }),
   })
   const data = await res.json()
   if (!res.ok) return alert(data.error)
   openTerminal(data)
 }
-$('popup-start').onclick = startChat
+$('popup-start').onclick = () => startChat()
+$('popup-split').onclick = () => startChat('split-doc')
 popupInput.onkeydown = (e) => {
   if (e.key === 'Enter' && !e.isComposing) startChat()
   if (e.key === 'Escape') hidePopup()
