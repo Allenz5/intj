@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>intj</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <section id="doc">
+        <header class="bar"><span id="doc-name"></span></header>
+        <div id="doc-scroll">
+          <div id="doc-body">
+            <article id="preview"></article>
+            <aside id="gutter"></aside>
+          </div>
+        </div>
+      </section>
+      <div id="divider" hidden></div>
+      <section id="panel" hidden>
+        <header class="bar dark">
+          <span id="panel-title"></span>
+          <span class="spacer"></span>
+          <button id="panel-close">关闭</button>
+        </header>
+        <div id="terms"></div>
+      </section>
+    </div>
+    <div id="popup" hidden>
+      <input id="popup-input" placeholder="要 Claude 做什么？" autocomplete="off" />
+      <button id="popup-start">Start chat</button>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
