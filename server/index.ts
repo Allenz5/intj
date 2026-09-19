@@ -190,11 +190,15 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
   const worktree = path.join(workloadDir, 'worktrees', id)
   git(['worktree', 'add', '-b', branch, worktree, ...(from ? [snapshot(from)] : [])])
 
-  // Quote the selection as context only; naming the doc made agents think they should edit it.
   const quoted = quote ? quote.split('\n').map((l) => `> ${l}`).join('\n') + '\n\n' : ''
+  // The doc's copy in this session's worktree, which is the one the agent should update.
+  const file = path.join(worktree, workloadRel, doc)
+  const context =
+    `Doc: ${file}\n\n${quoted && `Selected text:\n${quoted}`}${prompt && `Comment: ${prompt}\n\n`}` +
+    `When done, update the markdown doc at ${file}.`
   // Pass the prompt through the environment to avoid shell quoting issues.
   if (skill) prompt = `/intj:${skill} ${prompt}`.trim()
-  let text = skill ? `${prompt}\n\n${quoted}` : quoted + prompt
+  let text = skill ? `${prompt}\n\n${context}` : context
   // The forked conversation names the old worktree's paths, so point the agent at its own copy.
   if (from) text = `(Forked: you now work in ${worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
   const chat = crypto.randomUUID()
