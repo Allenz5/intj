@@ -242,30 +242,78 @@ async function mergeFile3(ours: string, base: string, theirs: string) {
   }
 }
 
-// Merge the session's doc edits back into the workload, 3-way against the base it started from, so
-// concurrent sessions don't clobber each other. Returns the docs that merged with conflicts.
-async function mergeDocs(s: Session) {
-  const srcDir = path.join(s.worktree, workloadRel)
+// Bring the workload's current docs into a session's worktree, 3-way against its base, and advance the
+// base to them, so the session works on (and its Merge preview shows) what other sessions merged. A
+// doc that conflicts is left alone unless `markers` is set, when it gets the conflict-marked text.
+// Returns the docs that conflicted.
+async function syncDocs(s: Session, markers = false) {
+  const dir = path.join(s.worktree, workloadRel)
   const conflicts: string[] = []
-  for (const rel of new Set([...listDocs(srcDir), ...Object.keys(s.docBase)])) {
+  for (const rel of new Set([...listDocs(workloadDir), ...Object.keys(s.docBase)])) {
+    const main = readDoc(path.join(workloadDir, rel))
     const base = s.docBase[rel] ?? ''
-    const theirs = readDoc(path.join(srcDir, rel))
-    if (theirs === base) continue // the session left this doc alone
-    const oursPath = path.join(workloadDir, rel)
-    const ours = readDoc(oursPath)
-    let text = theirs
-    if (ours !== base && ours !== theirs) {
-      const m = await mergeFile3(ours, base, theirs)
+    if (main === base) continue
+    const file = path.join(dir, rel)
+    const mine = readDoc(file)
+    let text = main
+    if (mine !== base && mine !== main) {
+      const m = await mergeFile3(main, base, mine)
+      if (m.conflict) {
+        conflicts.push(rel)
+        if (!markers) continue
+      }
       text = m.text
-      if (m.conflict) conflicts.push(rel)
     }
+    if (text !== mine) {
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, text)
+    }
+    s.docBase[rel] = main
+  }
+  return conflicts
+}
+
+// Keep every live session's docs current after the workload's docs change.
+let syncTimer: ReturnType<typeof setTimeout> | undefined
+function syncAllDocs() {
+  clearTimeout(syncTimer)
+  syncTimer = setTimeout(async () => {
+    for (const s of sessions.values()) {
+      // Sessions of another workload, and ones still copying their docs in, have nothing to sync.
+      if (s.status === 'creating' || !s.worktree.startsWith(workloadDir + path.sep)) continue
+      try {
+        await syncDocs(s)
+      } catch {}
+    }
+  }, 300)
+}
+
+const hasMarkers = (text: string) => /^(<{7} current|>{7} session)$/m.test(text)
+
+// Merge the session's doc edits back into the workload. First sync the workload into the session, so
+// what remains is a plain copy; a doc that conflicts gets conflict markers in the session's worktree
+// (never in the workload) and is left for the merge-doc skill. Returns the docs that conflicted,
+// including any whose markers are still unresolved from an earlier Merge.
+async function mergeDocs(s: Session) {
+  const conflicts = await syncDocs(s, true)
+  const srcDir = path.join(s.worktree, workloadRel)
+  for (const rel of new Set([...listDocs(srcDir), ...Object.keys(s.docBase)])) {
+    if (conflicts.includes(rel)) continue
+    const theirs = readDoc(path.join(srcDir, rel))
+    if (hasMarkers(theirs)) {
+      conflicts.push(rel)
+      continue
+    }
+    if (theirs === (s.docBase[rel] ?? '')) continue // the session left this doc alone
+    const oursPath = path.join(workloadDir, rel)
     fs.mkdirSync(path.dirname(oursPath), { recursive: true })
-    fs.writeFileSync(oursPath, text)
+    fs.writeFileSync(oursPath, theirs)
     // Advance the base so a later merge of the same session only carries new edits.
     s.docBase[rel] = theirs
   }
   return conflicts
 }
+
 type Anchor = Pick<Session, 'quote' | 'prefix' | 'suffix' | 'pos'>
 const sessions = new Map<string, Session>()
 
@@ -400,36 +448,65 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
   return s
 }
 
+// Whether the worktree is in the middle of a git merge (its conflicts not yet committed).
+const midMerge = async (dir: string) => {
+  try {
+    await git(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], dir)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Conflicts are resolved in the session's worktree, never on the current branch: docs get markers in
+// the session's copy, and when the code won't merge cleanly the current branch is merged into the
+// session's branch instead. The session's agent resolves both; the next Merge is then clean.
 async function mergeSession(s: Session) {
-  // Merge docs first (outside git) so they land even if the code merge needs a hand-off.
+  if (await midMerge(s.worktree)) throw new Error('The worktree is still resolving merge conflicts; Merge again once they are committed')
+  // Merge docs first (outside git) so they land even if the code conflicts.
   const docConflicts = await mergeDocs(s)
   // Merge the code via git; docs are ignored, so only real code is committed and merged.
   await git(['add', '-A'], s.worktree)
   if ((await git(['status', '--porcelain'], s.worktree)).trim()) {
     await git(['commit', '-m', `intj ${s.id}: ${s.prompt.split('\n')[0]}`], s.worktree)
   }
+  let codeConflict = false
   try {
     await git(['merge', '--no-edit', s.branch])
   } catch (e) {
     try {
       await git(['merge', '--abort'])
     } catch {}
-    ;(e as any).docConflicts = docConflicts
-    throw e
+    const current = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
+    const target = current === 'HEAD' ? (await git(['rev-parse', 'HEAD'])).trim() : current
+    try {
+      await git(['merge', '--no-edit', target], s.worktree)
+    } catch (e2) {
+      // Anything other than a conflict (which leaves the merge in progress) is a real error.
+      if (!(await midMerge(s.worktree))) throw e2
+      codeConflict = true
+    }
+    // The session now contains the current branch, so this merge is a fast-forward; if it still fails,
+    // the cause wasn't a conflict (a dirty checkout, say), so report it.
+    if (!codeConflict) await git(['merge', '--no-edit', s.branch])
   }
-  return docConflicts
+  if (docConflicts.length || codeConflict) handOffConflicts(s, docConflicts, codeConflict)
+  return { docConflicts, codeConflict }
 }
 
-// When git can't merge on its own (usually a conflict), hand the job to the agent on the main
-// checkout, following the merge skill, which resolves conflicts whose intent is clear.
-function handOffMerge(s: Session) {
-  const text = `/intj:merge-worktree ${s.branch}`
-  if (mainTerm?.status === 'running') {
-    mainTerm.term!.write(text)
+// Ask the session's own agent, which knows what it meant, to resolve its conflicts in the worktree.
+function handOffConflicts(s: Session, docs: string[], code: boolean) {
+  const files = docs.map((rel) => path.join(s.worktree, workloadRel, rel)).join(' ')
+  const codeText =
+    'Merging the current branch into this worktree hit git conflicts (git status lists them). Resolve them ' +
+    'keeping the intent of both sides, git add the files, then git commit --no-edit.'
+  const text = docs.length ? `/intj:merge-doc ${files}${code ? ` — then: ${codeText}` : ''}` : codeText
+  if (s.status === 'running') {
+    s.term!.write(text)
     // Send Enter separately so the TUI doesn't treat it as part of a paste.
-    setTimeout(() => mainTerm?.term?.write('\r'), 300)
+    setTimeout(() => s.term?.write('\r'), 300)
   } else {
-    mainTerm = spawnAgent(projectDir, `${agentCmd} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+    startTerm(s, s.worktree, `${agentCmd} --resume ${s.chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
   }
 }
 
@@ -538,15 +615,10 @@ server.on('request', async (req, res) => {
         await endSession(s)
         return sendJson(res, 200, { ok: true })
       }
-      try {
-        const docConflicts = await mergeSession(s)
-        refreshUnmerged(s)
-        broadcastSessions()
-        return sendJson(res, 200, { ok: true, docConflicts })
-      } catch (e) {
-        handOffMerge(s)
-        return sendJson(res, 200, { ok: true, handedOff: true, error: errorText(e), docConflicts: (e as any).docConflicts ?? [] })
-      }
+      const { docConflicts, codeConflict } = await mergeSession(s)
+      refreshUnmerged(s)
+      broadcastSessions()
+      return sendJson(res, 200, { ok: true, handedOff: docConflicts.length > 0 || codeConflict, docConflicts, codeConflict })
     }
     sendJson(res, 404, { error: 'not found' })
   } catch (e) {
@@ -606,6 +678,7 @@ const watchDocs = () => {
     if (text === lastText.get(name)) return
     lastText.set(name, text)
     broadcast({ type: 'content', name, text })
+    syncAllDocs()
   })
   // A watch on a folder that gets removed still emits errors; never let one crash the server.
   docWatcher.on('error', () => {})
