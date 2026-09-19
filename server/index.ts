@@ -30,16 +30,15 @@ if (!fs.existsSync(excludeFile) || !fs.readFileSync(excludeFile, 'utf8').include
 
 type AgentTerm = {
   status: 'running' | 'exited'
-  // Whether the agent is producing output; a quiet terminal means it's done and waiting for input.
+  // Whether the agent is working on a turn, as opposed to waiting for input.
   busy: boolean
-  idleTimer?: NodeJS.Timeout
   term: IPty
   buffer: string
   clients: Set<WebSocket>
 }
 const MAX_BUFFER = 500_000
-// Agent TUIs animate a spinner while working, so this long without output means the turn is over.
-const IDLE_MS = 3000
+// Claude Code reports its state in the terminal title: a spinning glyph while working, ✳ when waiting.
+const TITLE = /\x1b\]0;([^\x07]*)\x07/g
 
 function spawnAgent(cwd: string, command: string, env: Record<string, string> = {}): AgentTerm {
   const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', command], {
@@ -50,6 +49,8 @@ function spawnAgent(cwd: string, command: string, env: Record<string, string> = 
     env: { ...process.env, COLORTERM: 'truecolor', ...env },
   })
   const t: AgentTerm = { status: 'running', busy: true, term, buffer: '', clients: new Set() }
+  // It titles itself ✳ while booting, before it picks up the first prompt; ignore that one.
+  let working = false
   const setBusy = (busy: boolean) => {
     if (t.busy === busy) return
     t.busy = busy
@@ -64,13 +65,14 @@ function spawnAgent(cwd: string, command: string, env: Record<string, string> = 
     // Keep recent output so a terminal opened later (or after a page reload) shows history.
     t.buffer = (t.buffer + data).slice(-MAX_BUFFER)
     for (const ws of t.clients) ws.send(data)
-    setBusy(true)
-    clearTimeout(t.idleTimer)
-    t.idleTimer = setTimeout(() => setBusy(false), IDLE_MS)
+    for (const [, title] of data.matchAll(TITLE)) {
+      const idle = title.startsWith('✳')
+      if (!idle) working = true
+      if (working) setBusy(!idle)
+    }
   })
   term.onExit(() => {
     t.status = 'exited'
-    clearTimeout(t.idleTimer)
     for (const ws of t.clients) ws.send('\r\n[进程已退出]\r\n')
     broadcastSessions()
   })
