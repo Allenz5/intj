@@ -133,6 +133,11 @@ server.on('request', async (req, res) => {
       const { quote, prompt } = await readBody(req)
       return sendJson(res, 200, publicSession(startSession(quote, prompt)))
     }
+    if (req.method === 'GET' && url === '/api/tree') {
+      // Tracked plus untracked-but-not-ignored files, so the tree follows .gitignore.
+      const files = git(['ls-files', '--cached', '--others', '--exclude-standard']).split('\n').filter(Boolean)
+      return sendJson(res, 200, { files })
+    }
     const m = url.match(/^\/api\/sessions\/(\w+)\/(merge|end)$/)
     const s = m && sessions.get(m[1])
     if (req.method === 'POST' && s) {
