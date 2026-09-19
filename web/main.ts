@@ -24,7 +24,61 @@ events.onmessage = (e) => {
   } else if (msg.type === 'sessions') {
     sessions = msg.list
     renderCards()
+    // Sent on connect (after the doc name) and after merges, which can change files.
+    loadTree()
   }
+}
+
+// ---- Directory tree ----
+
+type Dir = Map<string, Dir | null>
+
+async function loadTree() {
+  const { files } = (await (await fetch('/api/tree')).json()) as { files: string[] }
+  const root: Dir = new Map()
+  for (const f of files) {
+    const parts = f.split('/')
+    let dir = root
+    for (const p of parts.slice(0, -1)) {
+      if (!dir.get(p)) dir.set(p, new Map())
+      dir = dir.get(p)!
+    }
+    dir.set(parts.at(-1)!, null)
+  }
+  // Keep folders the user expanded open across reloads.
+  const open = new Set([...$('tree-list').querySelectorAll<HTMLElement>('details[open]')].map((d) => d.dataset.path))
+  $('tree-list').replaceChildren(renderDir(root, '', open))
+}
+
+// Directories first, each a <details> so it folds on its own.
+function renderDir(dir: Dir, prefix: string, open: Set<string | undefined>): HTMLElement {
+  const ul = document.createElement('ul')
+  const entries = [...dir].sort(([a, x], [b, y]) => Number(!x) - Number(!y) || a.localeCompare(b))
+  for (const [name, sub] of entries) {
+    const li = document.createElement('li')
+    const path = prefix + name
+    if (sub) {
+      const details = document.createElement('details')
+      details.dataset.path = path
+      details.open = open.has(path)
+      const summary = document.createElement('summary')
+      summary.textContent = name
+      details.append(summary, renderDir(sub, path + '/', open))
+      li.append(details)
+    } else {
+      li.textContent = name
+      li.classList.toggle('current', path === $('doc-name').textContent)
+    }
+    ul.append(li)
+  }
+  return ul
+}
+
+$('tree-toggle').onclick = () => {
+  const collapsed = $('tree').classList.toggle('collapsed')
+  $('tree-toggle').textContent = collapsed ? '»' : '«'
+  $('tree-toggle').title = collapsed ? '展开' : '折叠'
+  requestAnimationFrame(layoutCards)
 }
 
 // ---- Anchoring a quote in the rendered preview ----
@@ -270,7 +324,8 @@ $('divider').onpointerdown = (e) => {
   const divider = $('divider')
   divider.setPointerCapture(e.pointerId)
   divider.onpointermove = (ev) => {
-    const pct = Math.min(80, Math.max(20, (ev.clientX / window.innerWidth) * 100))
+    const left = $('doc').getBoundingClientRect().left
+    const pct = Math.min(80, Math.max(20, ((ev.clientX - left) / window.innerWidth) * 100))
     $('doc').style.flex = `0 0 ${pct}%`
   }
   divider.onpointerup = () => {
