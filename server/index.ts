@@ -30,11 +30,16 @@ if (!fs.existsSync(excludeFile) || !fs.readFileSync(excludeFile, 'utf8').include
 
 type AgentTerm = {
   status: 'running' | 'exited'
+  // Whether the agent is producing output; a quiet terminal means it's done and waiting for input.
+  busy: boolean
+  idleTimer?: NodeJS.Timeout
   term: IPty
   buffer: string
   clients: Set<WebSocket>
 }
 const MAX_BUFFER = 500_000
+// Agent TUIs animate a spinner while working, so this long without output means the turn is over.
+const IDLE_MS = 3000
 
 function spawnAgent(cwd: string, command: string, env: Record<string, string> = {}): AgentTerm {
   const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', command], {
@@ -44,14 +49,25 @@ function spawnAgent(cwd: string, command: string, env: Record<string, string> = 
     rows: 30,
     env: { ...process.env, COLORTERM: 'truecolor', ...env },
   })
-  const t: AgentTerm = { status: 'running', term, buffer: '', clients: new Set() }
+  const t: AgentTerm = { status: 'running', busy: true, term, buffer: '', clients: new Set() }
+  const setBusy = (busy: boolean) => {
+    if (t.busy === busy) return
+    t.busy = busy
+    // Sessions extend this object, so an id means this terminal is a session's.
+    const id = (t as Partial<Session>).id
+    if (id) broadcast({ type: 'activity', id, busy })
+  }
   term.onData((data) => {
     // Keep recent output so a terminal opened later (or after a page reload) shows history.
     t.buffer = (t.buffer + data).slice(-MAX_BUFFER)
     for (const ws of t.clients) ws.send(data)
+    setBusy(true)
+    clearTimeout(t.idleTimer)
+    t.idleTimer = setTimeout(() => setBusy(false), IDLE_MS)
   })
   term.onExit(() => {
     t.status = 'exited'
+    clearTimeout(t.idleTimer)
     for (const ws of t.clients) ws.send('\r\n[进程已退出]\r\n')
     broadcastSessions()
   })
@@ -76,7 +92,7 @@ type Session = AgentTerm & {
 }
 const sessions = new Map<string, Session>()
 
-const publicSession = ({ id, quote, prompt, branch, status }: Session) => ({ id, quote, prompt, branch, status })
+const publicSession = ({ id, quote, prompt, branch, status, busy }: Session) => ({ id, quote, prompt, branch, status, busy })
 const broadcastSessions = () => broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
 
 function startSession(quote: string, prompt: string) {
