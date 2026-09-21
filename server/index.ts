@@ -23,8 +23,9 @@ let workloadRel = ''
 let agentCmd = process.env.INTJ_AGENT ?? 'claude'
 // Directories a session's worktree is cone-checked-out to; empty means a full checkout. Set from the
 // picker (or INTJ_SPARSE) to speed up worktree creation on a huge repo.
+const normDir = (d: string) => d.trim().replace(/\/+$/, '')
 // Multiple dirs, separated by whitespace, commas, or colons; trailing slashes trimmed.
-const parseCone = (s: string) => s.split(/[\s:,]+/).map((d) => d.replace(/\/+$/, '')).filter(Boolean)
+const parseCone = (s: string) => s.split(/[\s:,]+/).map(normDir).filter(Boolean)
 let sparseCone = parseCone(process.env.INTJ_SPARSE ?? '')
 const port = Number(process.env.PORT ?? 5173)
 
@@ -34,24 +35,27 @@ const execFileP = promisify(execFile)
 const git = async (args: string[], cwd = projectDir, env = process.env) =>
   (await execFileP('git', args, { cwd, encoding: 'utf8', env, maxBuffer: 256 * 1024 * 1024 })).stdout
 
-// ---- Per-project settings ----
+// ---- Per-workload settings ----
 
-// The agent command and sparse dirs are saved under <project>/.intj/settings.json (untracked, like
-// the rest of .intj), so they come back when the project's folder is picked again on the start page.
-const settingsFile = (dir: string) => path.join(dir, '.intj', 'settings.json')
-type Settings = { agent?: string; sparse?: string }
-function loadSettings(dir: string): Settings {
+// Each workload keeps its own agent command and sparse dirs in its settings.json (untracked, like the
+// rest of .intj); a new workload copies the most recent one's (the picker seeds them). Applied to the
+// live agentCmd/sparseCone when the workload is opened, since sessions run against the open workload.
+type Settings = { agent: string; sparse: string[] }
+const settingsFile = (workloadDir: string) => path.join(workloadDir, 'settings.json')
+function loadSettings(workloadDir: string): Settings {
   try {
-    const s = JSON.parse(fs.readFileSync(settingsFile(dir), 'utf8'))
-    return { agent: typeof s.agent === 'string' ? s.agent : undefined, sparse: typeof s.sparse === 'string' ? s.sparse : undefined }
+    const s = JSON.parse(fs.readFileSync(settingsFile(workloadDir), 'utf8'))
+    return {
+      agent: typeof s.agent === 'string' && s.agent.trim() ? s.agent : 'claude',
+      sparse: Array.isArray(s.sparse) ? s.sparse.map(String).map(normDir).filter(Boolean) : [],
+    }
   } catch {
-    return {}
+    return { agent: 'claude', sparse: [] }
   }
 }
 function saveSettings() {
-  if (!projectDir) return
-  fs.mkdirSync(path.join(projectDir, '.intj'), { recursive: true })
-  fs.writeFileSync(settingsFile(projectDir), JSON.stringify({ agent: agentCmd, sparse: sparseCone.join(' ') }, null, 2))
+  if (!workloadDir) return
+  fs.writeFileSync(settingsFile(workloadDir), JSON.stringify({ agent: agentCmd, sparse: sparseCone }, null, 2))
 }
 
 // Check each sparse dir names a real directory in the repo at HEAD, so a session's worktree isn't
@@ -98,11 +102,16 @@ async function openProject(dir: string) {
   return listWorkloads()
 }
 
-// Newest first, each titled by its root doc's first heading.
+// Newest first, each titled by its root doc's first heading, with its saved settings so the picker can
+// show them and seed a new workload from the most recent.
 function listWorkloads() {
   const root = path.join(projectDir, '.intj')
   const ids = fs.existsSync(root) ? fs.readdirSync(root).filter((n) => WORKLOAD.test(n)).sort().reverse() : []
-  return ids.map((id) => ({ id, title: readDoc(path.join(root, id, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '' }))
+  return ids.map((id) => {
+    const dir = path.join(root, id)
+    const { agent, sparse } = loadSettings(dir)
+    return { id, title: readDoc(path.join(dir, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '', agent, sparse }
+  })
 }
 
 // Open a workload, or create one when no id is given.
@@ -615,27 +624,32 @@ server.on('request', async (req, res) => {
         .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
         .map((e) => e.name)
         .sort()
-      // Any settings this folder already has, so browsing to it refills the picker's inputs.
-      return sendJson(res, 200, { path: dir, parent: path.dirname(dir), dirs, settings: loadSettings(dir) })
+      return sendJson(res, 200, { path: dir, parent: path.dirname(dir), dirs })
     }
     if (req.method === 'POST' && url === '/api/project') {
-      const { path: dir, agent, sparse } = await readBody(req)
+      const { path: dir } = await readBody(req)
       const workloads = await openProject(dir)
-      // The picker's inputs win (they were prefilled from this folder's saved settings). Reject sparse
-      // dirs that don't exist in the repo before opening, so a worktree isn't cone-checked out to
-      // nothing; on rejection nothing is applied or saved, so the user can fix the input and retry.
-      const cone = typeof sparse === 'string' ? parseCone(sparse) : sparseCone
-      const bad = await invalidSparseDirs(cone)
-      if (bad.length)
-        return sendJson(res, 400, { error: `Sparse ${bad.length > 1 ? 'directories' : 'directory'} not found in the repo: ${bad.join(', ')}` })
-      if (typeof agent === 'string') agentCmd = agent.trim() || 'claude'
-      sparseCone = cone
-      saveSettings()
-      return sendJson(res, 200, { project: projectDir, workloads, agent: agentCmd, sparse: sparseCone.join(' ') })
+      return sendJson(res, 200, { project: projectDir, workloads })
     }
     if (req.method === 'POST' && url === '/api/workload') {
-      const { id } = await readBody(req)
+      const { id, agent, sparse } = await readBody(req)
+      // The agent command and sparse dirs come from the picker (the config it shows for this workload,
+      // seeded from the most recent one for a new workload). Reject sparse dirs that don't exist in the
+      // repo before opening, so a session's worktree isn't cone-checked out to nothing.
+      const cone =
+        sparse === undefined ? undefined : Array.isArray(sparse) ? sparse.map(String).map(normDir).filter(Boolean) : parseCone(String(sparse))
+      if (cone) {
+        const bad = await invalidSparseDirs(cone)
+        if (bad.length)
+          return sendJson(res, 400, { error: `Sparse ${bad.length > 1 ? 'directories' : 'directory'} not found in the repo: ${bad.join(', ')}` })
+      }
       await openWorkload(id)
+      // Apply the picker's values to this workload and persist them; fall back to its saved settings
+      // when the picker sent none (e.g. reopening straight from a link).
+      const saved = loadSettings(workloadDir)
+      agentCmd = typeof agent === 'string' ? agent.trim() || 'claude' : saved.agent
+      sparseCone = cone ?? saved.sparse
+      saveSettings()
       return sendJson(res, 200, { ok: true })
     }
     if (req.method === 'POST' && url === '/api/workload/delete') {

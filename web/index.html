@@ -12,14 +12,6 @@
           <h2>Choose a project folder</h2>
           <div id="dir-path"></div>
           <ul id="dir-list"></ul>
-          <div id="picker-agent">
-            <label for="picker-agent-cmd">Agent command</label>
-            <input id="picker-agent-cmd" placeholder="claude" autocomplete="off" spellcheck="false" />
-          </div>
-          <div id="picker-sparse">
-            <label for="picker-sparse-dirs">Sparse directories</label>
-            <input id="picker-sparse-dirs" placeholder="(optional) space- or comma-separated, e.g. spark/dbr, services/x" autocomplete="off" spellcheck="false" />
-          </div>
           <button id="dir-choose">Use this folder</button>
         </section>
         <section id="pick-workload" hidden>
@@ -27,6 +19,20 @@
           <div id="workload-project"></div>
           <button id="workload-new">New workload</button>
           <ul id="workload-list"></ul>
+          <div id="workload-config">
+            <div id="picker-agent">
+              <label for="picker-agent-cmd">Agent command</label>
+              <input id="picker-agent-cmd" placeholder="claude" autocomplete="off" spellcheck="false" />
+            </div>
+            <div id="picker-sparse">
+              <div class="picker-sparse-head">
+                <label>Sparse directories</label>
+                <button id="sparse-add" type="button" title="Add a directory">+</button>
+              </div>
+              <div id="sparse-list"></div>
+            </div>
+            <button id="workload-open">Open workload</button>
+          </div>
         </section>
       </div>
     </div>

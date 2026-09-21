@@ -253,11 +253,18 @@ button:disabled {
   font-size: 12px;
   word-break: break-all;
 }
-#picker-agent,
-#picker-sparse {
+#workload-config {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e3e5e8;
+}
+#picker-agent {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin: 8px 0;
+}
+#picker-sparse {
   margin: 8px 0;
 }
 #picker-agent label,
@@ -266,8 +273,37 @@ button:disabled {
   font-size: 13px;
   white-space: nowrap;
 }
+.picker-sparse-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+#sparse-add {
+  padding: 0 8px;
+  line-height: 1.4;
+}
+.sparse-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.sparse-del {
+  flex: none;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  color: #a0a6af;
+  font-size: 16px;
+  line-height: 1;
+}
+.sparse-del:hover {
+  background: #f5d9d6;
+  color: #b3261e;
+}
 #picker-agent-cmd,
-#picker-sparse-dirs {
+.sparse-input {
   flex: 1;
   min-width: 0;
   font-family: Menlo, monospace;
@@ -275,6 +311,9 @@ button:disabled {
   padding: 4px 8px;
   border: 1px solid #cfd3d8;
   border-radius: 4px;
+}
+#workload-open {
+  margin-top: 8px;
 }
 #dir-list,
 #workload-list {
@@ -301,6 +340,9 @@ button:disabled {
 #dir-list li:hover,
 #workload-list li:hover {
   background: #eef2f8;
+}
+#workload-list li.selected {
+  background: #dce9fb;
 }
 #workload-list li {
   display: flex;

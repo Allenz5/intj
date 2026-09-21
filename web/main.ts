@@ -520,11 +520,39 @@ new ResizeObserver(() => {
 
 // ---- Picker settings inputs ----
 
-// The bash command that starts each agent (default 'claude') and the directories a session's worktree
-// is cone-checked-out to (empty = full checkout). Both are read when a folder is chosen and saved to
-// that project's .intj/settings.json, and refilled from there when the folder is browsed to again.
+// A workload's agent command (default 'claude') and its sparse dirs (each in its own input; empty =
+// full checkout). Shown on the workload page, editable before opening, and saved with the workload.
+type WorkloadInfo = { id: string; title: string; agent: string; sparse: string[] }
 const pickerAgentInput = $<HTMLInputElement>('picker-agent-cmd')
-const pickerSparseInput = $<HTMLInputElement>('picker-sparse-dirs')
+
+function addSparseInput(value = '') {
+  const row = document.createElement('div')
+  row.className = 'sparse-row'
+  const input = document.createElement('input')
+  input.className = 'sparse-input'
+  input.placeholder = 'e.g. spark/dbr'
+  input.autocomplete = 'off'
+  input.spellcheck = false
+  input.value = value
+  const del = document.createElement('button')
+  del.type = 'button'
+  del.className = 'sparse-del'
+  del.textContent = '×'
+  del.title = 'Remove'
+  del.onclick = () => row.remove()
+  row.append(input, del)
+  $('sparse-list').append(row)
+  return input
+}
+// Always keep at least one (empty) row, so there's a field to type into.
+function setSparseInputs(dirs: string[]) {
+  $('sparse-list').replaceChildren()
+  for (const d of dirs.length ? dirs : ['']) addSparseInput(d)
+}
+const getSparseInputs = () =>
+  [...$('sparse-list').querySelectorAll<HTMLInputElement>('.sparse-input')].map((i) => i.value.trim()).filter(Boolean)
+
+$('sparse-add').onclick = () => addSparseInput().focus()
 
 // ---- Divider ----
 
@@ -552,9 +580,6 @@ async function showDir(dir: string) {
   const data = await res.json()
   if (!res.ok) return alert(data.error)
   $('dir-path').textContent = data.path
-  // Refill the inputs from this folder's saved settings, if it has any.
-  if (data.settings?.agent !== undefined) pickerAgentInput.value = data.settings.agent
-  if (data.settings?.sparse !== undefined) pickerSparseInput.value = data.settings.sparse
   const entries: [string, string][] = data.dirs.map((d: string) => [d, `${data.path}/${d}`])
   if (data.parent !== data.path) entries.unshift(['..', data.parent])
   $('dir-list').replaceChildren(
@@ -568,50 +593,99 @@ async function showDir(dir: string) {
   $('dir-choose').onclick = () => chooseProject(data.path)
 }
 
+// The workloads in the picked project (newest first) and which one the config below is for; a null
+// selection means a new workload.
+let workloads: WorkloadInfo[] = []
+let selectedId: string | null = null
+
 async function chooseProject(dir: string) {
-  // Send whatever the (viewable, editable) inputs hold; the server applies and persists them.
-  const res = await post('/api/project', { path: dir, agent: pickerAgentInput.value, sparse: pickerSparseInput.value })
+  const res = await post('/api/project', { path: dir })
   const data = await res.json()
   if (!res.ok) return alert(data.error)
   $('pick-folder').hidden = true
   $('pick-workload').hidden = false
   $('workload-project').textContent = data.project
+  workloads = data.workloads
+  renderWorkloads()
+  // Open to the most recent workload if there is one; otherwise set up a new one.
+  if (workloads.length) selectWorkload(workloads[0].id)
+  else selectNew()
+}
+
+function renderWorkloads() {
   $('workload-list').replaceChildren(
-    ...data.workloads.map((w: { id: string; title: string }) => {
+    ...workloads.map((w) => {
       const li = document.createElement('li')
+      li.dataset.id = w.id
       // Ids start with yyyymmdd-hhmm.
       const [, y, mo, d, h, mi] = w.id.match(/^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)/)!
       const label = document.createElement('span')
       label.textContent = `${y}-${mo}-${d} ${h}:${mi}  ${w.title}`
       li.append(label)
       li.title = w.id
-      li.onclick = () => chooseWorkload(w.id)
+      li.onclick = () => selectWorkload(w.id)
       const del = document.createElement('button')
       del.className = 'workload-del'
       del.textContent = '×'
       del.title = 'Delete workload'
       del.onclick = async (e) => {
-        // Don't also open the workload.
+        // Don't also select the workload.
         e.stopPropagation()
         if (!confirm('Delete this workload? Its docs and any sessions will be removed.')) return
-        const res = await post('/api/workload/delete', { id: w.id })
-        const out = await res.json()
-        if (!res.ok) return alert(out.error)
-        li.remove()
+        const r = await post('/api/workload/delete', { id: w.id })
+        const out = await r.json()
+        if (!r.ok) return alert(out.error)
+        workloads = out.workloads
+        renderWorkloads()
+        if (selectedId === w.id) selectNew()
       }
       li.append(del)
       return li
     }),
   )
+  highlightSelected()
 }
 
-async function chooseWorkload(id?: string) {
-  const res = await post('/api/workload', { id })
+function highlightSelected() {
+  for (const li of $('workload-list').querySelectorAll<HTMLElement>('li')) {
+    li.classList.toggle('selected', li.dataset.id === selectedId)
+  }
+}
+
+function fillConfig(agent: string, sparse: string[]) {
+  pickerAgentInput.value = agent
+  setSparseInputs(sparse)
+}
+
+// Select an existing workload: show (and let the user edit) its own settings before opening.
+function selectWorkload(id: string) {
+  selectedId = id
+  const w = workloads.find((x) => x.id === id)
+  if (w) fillConfig(w.agent, w.sparse)
+  highlightSelected()
+  $('workload-open').textContent = 'Open workload'
+}
+
+// A new workload copies the most recent workload's settings (the list is newest-first).
+function selectNew() {
+  selectedId = null
+  const recent = workloads[0]
+  fillConfig(recent?.agent ?? 'claude', recent?.sparse ?? [])
+  highlightSelected()
+  $('workload-open').textContent = 'Create workload'
+}
+$('workload-new').onclick = selectNew
+
+$('workload-open').onclick = async () => {
+  const res = await post('/api/workload', {
+    id: selectedId ?? undefined,
+    agent: pickerAgentInput.value,
+    sparse: getSparseInputs(),
+  })
   const data = await res.json()
   if (!res.ok) return alert(data.error)
   start()
 }
-$('workload-new').onclick = () => chooseWorkload()
 
 function start() {
   $('picker').hidden = true
@@ -624,9 +698,7 @@ function start() {
 // A reload after choosing goes straight back to the workload.
 fetch('/api/state')
   .then((r) => r.json())
-  .then(({ workload, agent, sparse }) => {
-    pickerAgentInput.value = agent ?? 'claude'
-    pickerSparseInput.value = sparse ?? ''
+  .then(({ workload }) => {
     if (workload) return start()
     $('picker').hidden = false
     showDir('')
