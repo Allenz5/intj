@@ -14,6 +14,8 @@ const DEFAULT_DOC = 'main.md'
 let docName = ''
 let docText = ''
 let sessions: Session[] = []
+// Whether the always-on main agent is working, for its card's state.
+let mainBusy = false
 // Id of the session whose worktree doc is shown while its Merge button is hovered.
 let previewing: string | null = null
 
@@ -43,6 +45,10 @@ const onEvent = (e: MessageEvent) => {
     // The pty starts at a default size; once it's live, fit it to its pane.
     const t = activeId && terms.get(activeId)
     if (t) sendResize(t)
+  } else if (msg.type === 'main') {
+    mainBusy = msg.busy
+    const card = document.querySelector<HTMLElement>('.card[data-id="main"]')
+    if (card) renderMainState(card)
   } else if (msg.type === 'session-error') {
     alert(msg.error)
   }
@@ -191,6 +197,8 @@ function renderCards() {
   }
   const gutter = $('gutter')
   gutter.innerHTML = ''
+  // The main agent's card is always shown, on every doc; it has no worktree to merge or end.
+  gutter.append(mainCard())
   for (const s of sessions) {
     if (s.doc !== docName) continue
     const card = document.createElement('div')
@@ -226,6 +234,29 @@ function renderCards() {
     gutter.append(card)
   }
   layoutCards()
+}
+
+// The main agent's card: open its terminal or fork from it, but nothing to merge or end.
+function mainCard() {
+  const card = document.createElement('div')
+  card.className = 'card card-main'
+  card.dataset.id = 'main'
+  card.innerHTML = `
+    <div class="card-prompt">Main agent</div>
+    <div class="card-meta"><span class="card-state"></span><code>main</code></div>
+    <div class="card-actions"><button data-act="open">Open terminal</button></div>`
+  renderMainState(card)
+  card.onclick = (e) => {
+    if (forking) return forkFrom({ id: 'main' } as Session)
+    if ((e.target as HTMLElement).dataset.act === 'open') openTerminal(mainTerm)
+  }
+  return card
+}
+
+function renderMainState(card: HTMLElement) {
+  const el = card.querySelector<HTMLElement>('.card-state')!
+  el.className = `card-state ${mainBusy ? 'busy' : 'done'}`
+  el.textContent = mainBusy ? 'Working' : 'Ready'
 }
 
 function renderState(card: HTMLElement, s: Session) {
@@ -282,11 +313,12 @@ function layoutCards() {
   const f = flatten(preview)
   const cards = [...gutter.querySelectorAll<HTMLElement>('.card')]
   const placed = cards.map((card) => {
-    const s = sessions.find((x) => x.id === card.dataset.id)!
-    const hit = f.chars.length ? locate(f, s) : null
+    // The main card isn't a session and isn't anchored to a quote — pin it at the top.
+    const s = sessions.find((x) => x.id === card.dataset.id)
+    const hit = s && f.chars.length ? locate(f, s) : null
     if (hit && !hit.range.collapsed) ranges.push(hit.range)
-    card.classList.toggle('orphan', !hit?.exact)
-    return { card, top: hit ? hit.range.getBoundingClientRect().top - base : Infinity }
+    if (s) card.classList.toggle('orphan', !hit?.exact)
+    return { card, top: s ? (hit ? hit.range.getBoundingClientRect().top - base : Infinity) : -Infinity }
   })
   placed.sort((a, b) => a.top - b.top)
   for (const p of placed) {
@@ -427,11 +459,31 @@ function sendResize(t: Term) {
 // newline (ESC+CR, what Claude Code's terminal-setup binds it to).
 const MOUSE_MODES = [1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016]
 function enableCopyPaste(term: Terminal, send: (data: string) => void) {
+  // The agent's TUI turns on mouse reporting; keep that from xterm (so a plain drag selects text), but
+  // remember it — and whether SGR encoding is on — so the wheel can still be forwarded below.
+  let mouseOn = false
+  let sgrOn = false
   for (const final of ['h', 'l'] as const) {
-    term.parser.registerCsiHandler({ prefix: '?', final }, (params) =>
-      params.length === 1 && typeof params[0] === 'number' && MOUSE_MODES.includes(params[0]),
-    )
+    term.parser.registerCsiHandler({ prefix: '?', final }, (params) => {
+      if (!(params.length === 1 && typeof params[0] === 'number' && MOUSE_MODES.includes(params[0]))) return false
+      const on = final === 'h'
+      if ([1000, 1002, 1003].includes(params[0])) mouseOn = on
+      if ([1006, 1016].includes(params[0])) sgrOn = on
+      return true // swallow, so xterm never enters mouse mode
+    })
   }
+  // With mouse reporting hidden from xterm, on the alternate screen xterm would turn the wheel into
+  // arrow keys — which the agent reads as input-history navigation. Instead forward the wheel to the
+  // agent as the mouse events it expects, so it scrolls its own transcript; with no mouse app, let
+  // xterm scroll its own scrollback.
+  term.attachCustomWheelEventHandler((e) => {
+    if (!mouseOn) return true
+    const btn = e.deltaY < 0 ? 64 : 65 // wheel up / down
+    const n = Math.min(5, Math.max(1, Math.round(Math.abs(e.deltaY) / 40)))
+    const seq = sgrOn ? `\x1b[<${btn};1;1M` : `\x1b[M${String.fromCharCode(32 + btn, 33, 33)}`
+    for (let i = 0; i < n; i++) send(seq)
+    return false
+  })
   term.onSelectionChange(() => {
     const sel = term.getSelection()
     if (sel) navigator.clipboard?.writeText(sel).catch(() => {})

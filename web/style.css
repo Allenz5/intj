@@ -81,6 +81,14 @@ body {
   opacity: 0.6;
   pointer-events: none;
 }
+/* The always-on main agent card. */
+.card-main {
+  border-left: 3px solid #3b82f6;
+}
+.card-main .card-prompt {
+  margin-top: 0;
+  font-weight: 600;
+}
 /* Picking a card to fork from. */
 .forking .card {
   cursor: pointer;

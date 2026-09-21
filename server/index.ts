@@ -220,18 +220,25 @@ function setBusy(id: string, busy: boolean) {
     broadcast({ type: 'activity', id, busy, unmerged: unmergedCache.get(id) ?? false })
     // Recompute the merge state off the event loop rather than blocking on git here.
     refreshUnmerged(t as Session)
+  } else {
+    broadcast({ type: 'main', busy, status: mainTerm!.status })
+    // The main terminal may have just merged a handed-off session.
+    if (!busy) broadcastSessions()
   }
-  // The main terminal may have just merged a handed-off session.
-  else if (!busy) broadcastSessions()
 }
 
 const spawnAgent = (cwd: string, command: string, env: Record<string, string> = {}) =>
   startTerm(newTerm(), cwd, command, env)
 
-// The default terminal: a plain agent session on the main checkout, restarted if it has exited.
+// The default terminal: a plain agent session on the main checkout, restarted if it has exited. It
+// runs with a known session id so its conversation can be forked, like any other session.
 let mainTerm: AgentTerm | null = null
+let mainChat = ''
 const getMainTerm = () => {
-  if (mainTerm?.status !== 'running') mainTerm = spawnAgent(projectDir, agentWithHooks())
+  if (mainTerm?.status !== 'running') {
+    mainChat = crypto.randomUUID()
+    mainTerm = spawnAgent(projectDir, `${agentWithHooks()} --session-id ${mainChat}`)
+  }
   return mainTerm
 }
 
@@ -345,6 +352,8 @@ function syncAllDocs() {
         await syncDocs(s)
       } catch {}
     }
+    // docBase advanced for the synced sessions; keep the persisted merge bases current.
+    saveSessions()
   }, 300)
 }
 
@@ -407,10 +416,72 @@ const publicSession = (s: Session) => {
   const { id, doc, quote, prefix, suffix, pos, prompt, branch, status, busy } = s
   return { id, doc, quote, prefix, suffix, pos, prompt, branch, status, busy, unmerged: unmergedCache.get(id) ?? false }
 }
-const broadcastSessions = () => broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
+const broadcastSessions = () => {
+  saveSessions()
+  broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
+}
+
+// ---- Restoring sessions ----
+
+// A workload remembers its live sessions, so reopening it brings their cards and agents back. The
+// worktree, branch, and the agent's conversation all persist on disk already; this only records the
+// light metadata (ids, anchors, merge bases) needed to rebuild each Session. Saved (untracked) next to
+// the workload's docs, only for sessions of the currently open workload.
+const sessionsFile = () => path.join(workloadDir, 'sessions.json')
+function saveSessions() {
+  if (!workloadDir) return
+  const mine = [...sessions.values()].filter((s) => s.worktree.startsWith(workloadDir + path.sep))
+  try {
+    const data = mine.map(({ id, doc, quote, prefix, suffix, pos, prompt, branch, worktree, chat, docBase }) => ({
+      id, doc, quote, prefix, suffix, pos, prompt, branch, worktree, chat, docBase,
+    }))
+    fs.writeFileSync(sessionsFile(), JSON.stringify(data, null, 2))
+  } catch {}
+}
+
+// Rebuild the open workload's saved sessions, resuming each agent's conversation in its worktree.
+function restoreSessions() {
+  let saved: any[]
+  try {
+    saved = JSON.parse(fs.readFileSync(sessionsFile(), 'utf8'))
+  } catch {
+    return
+  }
+  if (!Array.isArray(saved)) return
+  for (const r of saved) {
+    if (!r?.id || sessions.has(r.id)) continue
+    const worktree = path.join(workloadDir, 'worktrees', r.id)
+    // Skip any whose worktree is gone (ended elsewhere, pruned); the save below then drops them.
+    if (!fs.existsSync(worktree)) continue
+    const s: Session = Object.assign(newTerm(), {
+      id: r.id,
+      doc: r.doc ?? 'main.md',
+      quote: r.quote ?? '',
+      prefix: r.prefix ?? '',
+      suffix: r.suffix ?? '',
+      pos: r.pos ?? 0,
+      prompt: r.prompt ?? '',
+      branch: r.branch ?? `intj/${r.id}`,
+      worktree,
+      chat: r.chat ?? '',
+      docBase: r.docBase ?? {},
+    })
+    sessions.set(r.id, s)
+    if (s.chat) {
+      // The conversation's jsonl still sits in this worktree's project dir, so --resume finds it.
+      startTerm(s, worktree, `${agentWithHooks()} --resume ${s.chat}`)
+      // Resuming isn't a turn — the agent waits for input.
+      s.busy = false
+    } else {
+      s.status = 'exited'
+    }
+    refreshUnmerged(s)
+  }
+  broadcastSessions()
+}
 
 // A commit of the worktree as it is now, uncommitted and untracked files included, leaving its index alone.
-async function snapshot(s: Session) {
+async function snapshot(s: Pick<Session, 'id' | 'worktree'>) {
   const index = path.join(os.tmpdir(), `intj-index-${crypto.randomUUID()}`)
   const env = { ...process.env, GIT_INDEX_FILE: index }
   try {
@@ -445,7 +516,7 @@ function copyChat(chat: string, worktree: string) {
 // With `from`, the session starts from that session's files and conversation as they are now.
 // The card is shown at once in a 'creating' state; the worktree is built and the agent started
 // off the event loop, so a slow repo doesn't block the request or freeze the server.
-function startSession(doc: string, anchor: Anchor, prompt: string, skill?: string, from?: Session) {
+function startSession(doc: string, anchor: Anchor, prompt: string, skill?: string, from?: Pick<Session, 'id' | 'worktree' | 'chat'>) {
   const { quote } = anchor
   const id = crypto.randomBytes(3).toString('hex')
   const branch = `intj/${id}`
@@ -650,6 +721,8 @@ server.on('request', async (req, res) => {
       agentCmd = typeof agent === 'string' ? agent.trim() || 'claude' : saved.agent
       sparseCone = cone ?? saved.sparse
       saveSettings()
+      // Bring back any sessions this workload had open (agentCmd is now set, so they resume correctly).
+      restoreSessions()
       return sendJson(res, 200, { ok: true })
     }
     if (req.method === 'POST' && url === '/api/workload/delete') {
@@ -667,8 +740,15 @@ server.on('request', async (req, res) => {
     }
     if (req.method === 'POST' && url === '/api/sessions') {
       const { doc, anchor, prompt, skill, from } = await readBody(req)
-      const src = from && sessions.get(from)
-      if (from && !src) return sendJson(res, 404, { error: `no session ${from}` })
+      let src: Pick<Session, 'id' | 'worktree' | 'chat'> | undefined
+      if (from === 'main') {
+        // Fork from the main agent: its checkout and conversation are the source.
+        if (!mainChat) return sendJson(res, 400, { error: 'Open the main agent and send it a message before forking from it' })
+        src = { id: 'main', worktree: projectDir, chat: mainChat }
+      } else if (from) {
+        src = sessions.get(from)
+        if (!src) return sendJson(res, 404, { error: `no session ${from}` })
+      }
       return sendJson(res, 200, publicSession(startSession(doc, anchor, prompt, skill, src)))
     }
     if (req.method === 'GET' && url === '/api/parent') {
@@ -760,6 +840,7 @@ const eventsWss = new WebSocketServer({ noServer: true })
 eventsWss.on('connection', (ws) => {
   eventClients.add(ws)
   ws.send(JSON.stringify({ type: 'sessions', list: [...sessions.values()].map(publicSession) }))
+  ws.send(JSON.stringify({ type: 'main', busy: mainTerm?.busy ?? false, status: mainTerm?.status ?? 'idle' }))
   ws.on('close', () => eventClients.delete(ws))
 })
 
