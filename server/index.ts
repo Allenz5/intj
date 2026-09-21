@@ -33,6 +33,26 @@ const execFileP = promisify(execFile)
 const git = async (args: string[], cwd = projectDir, env = process.env) =>
   (await execFileP('git', args, { cwd, encoding: 'utf8', env, maxBuffer: 256 * 1024 * 1024 })).stdout
 
+// ---- Per-project settings ----
+
+// The agent command and sparse dirs are saved under <project>/.intj/settings.json (untracked, like
+// the rest of .intj), so they come back when the project's folder is picked again on the start page.
+const settingsFile = (dir: string) => path.join(dir, '.intj', 'settings.json')
+type Settings = { agent?: string; sparse?: string }
+function loadSettings(dir: string): Settings {
+  try {
+    const s = JSON.parse(fs.readFileSync(settingsFile(dir), 'utf8'))
+    return { agent: typeof s.agent === 'string' ? s.agent : undefined, sparse: typeof s.sparse === 'string' ? s.sparse : undefined }
+  } catch {
+    return {}
+  }
+}
+function saveSettings() {
+  if (!projectDir) return
+  fs.mkdirSync(path.join(projectDir, '.intj'), { recursive: true })
+  fs.writeFileSync(settingsFile(projectDir), JSON.stringify({ agent: agentCmd, sparse: sparseCone.join(' ') }, null, 2))
+}
+
 // ---- Project and workload ----
 
 const WORKLOAD = /^\d{8}-\d{4}-[0-9a-f-]{36}$/
@@ -564,16 +584,6 @@ server.on('request', async (req, res) => {
     if (req.method === 'GET' && url === '/api/state') {
       return sendJson(res, 200, { workload: workloadDir && path.basename(workloadDir), agent: agentCmd, sparse: sparseCone.join(' ') })
     }
-    if (req.method === 'POST' && url === '/api/agent') {
-      const { command } = await readBody(req)
-      agentCmd = String(command ?? '').trim() || 'claude'
-      return sendJson(res, 200, { agent: agentCmd })
-    }
-    if (req.method === 'POST' && url === '/api/sparse') {
-      const { dirs } = await readBody(req)
-      sparseCone = parseCone(String(dirs ?? ''))
-      return sendJson(res, 200, { sparse: sparseCone.join(' ') })
-    }
     if (req.method === 'GET' && url === '/api/dirs') {
       const dir = path.resolve(searchParams.get('path') || startDir)
       const dirs = fs
@@ -581,12 +591,17 @@ server.on('request', async (req, res) => {
         .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
         .map((e) => e.name)
         .sort()
-      return sendJson(res, 200, { path: dir, parent: path.dirname(dir), dirs })
+      // Any settings this folder already has, so browsing to it refills the picker's inputs.
+      return sendJson(res, 200, { path: dir, parent: path.dirname(dir), dirs, settings: loadSettings(dir) })
     }
     if (req.method === 'POST' && url === '/api/project') {
-      const { path: dir } = await readBody(req)
+      const { path: dir, agent, sparse } = await readBody(req)
+      // The picker's inputs win (they were prefilled from this folder's saved settings), then persist.
+      if (typeof agent === 'string') agentCmd = agent.trim() || 'claude'
+      if (typeof sparse === 'string') sparseCone = parseCone(sparse)
       const workloads = await openProject(dir)
-      return sendJson(res, 200, { project: projectDir, workloads })
+      saveSettings()
+      return sendJson(res, 200, { project: projectDir, workloads, agent: agentCmd, sparse: sparseCone.join(' ') })
     }
     if (req.method === 'POST' && url === '/api/workload') {
       const { id } = await readBody(req)

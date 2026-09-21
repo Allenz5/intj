@@ -469,47 +469,13 @@ new ResizeObserver(() => {
   if (t) sendResize(t)
 }).observe($('terms'))
 
-// ---- Agent command ----
+// ---- Picker settings inputs ----
 
-// The bash command that starts each agent, set on the picker before the terminals start; default 'claude'.
-let agentCmd = 'claude'
+// The bash command that starts each agent (default 'claude') and the directories a session's worktree
+// is cone-checked-out to (empty = full checkout). Both are read when a folder is chosen and saved to
+// that project's .intj/settings.json, and refilled from there when the folder is browsed to again.
 const pickerAgentInput = $<HTMLInputElement>('picker-agent-cmd')
-
-async function setAgent(command: string) {
-  const res = await fetch('/api/agent', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ command }),
-  })
-  const data = await res.json()
-  if (!res.ok) return alert(data.error)
-  // Reflect the server's normalized value (empty falls back to 'claude').
-  agentCmd = data.agent
-  pickerAgentInput.value = data.agent
-}
-const savePickerAgent = () => setAgent(pickerAgentInput.value)
-pickerAgentInput.onchange = savePickerAgent
-pickerAgentInput.onkeydown = (e) => {
-  if (e.key === 'Enter' && !e.isComposing) savePickerAgent()
-}
-
-// Directories a session's worktree is cone-checked-out to; empty = full checkout.
 const pickerSparseInput = $<HTMLInputElement>('picker-sparse-dirs')
-async function setSparse(dirs: string) {
-  const res = await fetch('/api/sparse', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ dirs }),
-  })
-  const data = await res.json()
-  if (!res.ok) return alert(data.error)
-  pickerSparseInput.value = data.sparse
-}
-const saveSparse = () => setSparse(pickerSparseInput.value)
-pickerSparseInput.onchange = saveSparse
-pickerSparseInput.onkeydown = (e) => {
-  if (e.key === 'Enter' && !e.isComposing) saveSparse()
-}
 
 // ---- Divider ----
 
@@ -537,6 +503,9 @@ async function showDir(dir: string) {
   const data = await res.json()
   if (!res.ok) return alert(data.error)
   $('dir-path').textContent = data.path
+  // Refill the inputs from this folder's saved settings, if it has any.
+  if (data.settings?.agent !== undefined) pickerAgentInput.value = data.settings.agent
+  if (data.settings?.sparse !== undefined) pickerSparseInput.value = data.settings.sparse
   const entries: [string, string][] = data.dirs.map((d: string) => [d, `${data.path}/${d}`])
   if (data.parent !== data.path) entries.unshift(['..', data.parent])
   $('dir-list').replaceChildren(
@@ -551,7 +520,8 @@ async function showDir(dir: string) {
 }
 
 async function chooseProject(dir: string) {
-  const res = await post('/api/project', { path: dir })
+  // Send whatever the (viewable, editable) inputs hold; the server applies and persists them.
+  const res = await post('/api/project', { path: dir, agent: pickerAgentInput.value, sparse: pickerSparseInput.value })
   const data = await res.json()
   if (!res.ok) return alert(data.error)
   $('pick-folder').hidden = true
@@ -606,8 +576,7 @@ function start() {
 fetch('/api/state')
   .then((r) => r.json())
   .then(({ workload, agent, sparse }) => {
-    agentCmd = agent ?? 'claude'
-    pickerAgentInput.value = agentCmd
+    pickerAgentInput.value = agent ?? 'claude'
     pickerSparseInput.value = sparse ?? ''
     if (workload) return start()
     $('picker').hidden = false
