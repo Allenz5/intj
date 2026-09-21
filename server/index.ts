@@ -23,7 +23,8 @@ let workloadRel = ''
 let agentCmd = process.env.INTJ_AGENT ?? 'claude'
 // Directories a session's worktree is cone-checked-out to; empty means a full checkout. Set from the
 // picker (or INTJ_SPARSE) to speed up worktree creation on a huge repo.
-const parseCone = (s: string) => s.split(/[\s:,]+/).filter(Boolean)
+// Multiple dirs, separated by whitespace, commas, or colons; trailing slashes trimmed.
+const parseCone = (s: string) => s.split(/[\s:,]+/).map((d) => d.replace(/\/+$/, '')).filter(Boolean)
 let sparseCone = parseCone(process.env.INTJ_SPARSE ?? '')
 const port = Number(process.env.PORT ?? 5173)
 
@@ -51,6 +52,29 @@ function saveSettings() {
   if (!projectDir) return
   fs.mkdirSync(path.join(projectDir, '.intj'), { recursive: true })
   fs.writeFileSync(settingsFile(projectDir), JSON.stringify({ agent: agentCmd, sparse: sparseCone.join(' ') }, null, 2))
+}
+
+// Check each sparse dir names a real directory in the repo at HEAD, so a session's worktree isn't
+// cone-checked out to nothing. Returns the dirs that don't exist (empty if all are fine, or the repo
+// has no commits yet — then there's nothing to check against). Paths are repo-root-relative, matching
+// how `git sparse-checkout set` reads them.
+async function invalidSparseDirs(dirs: string[]): Promise<string[]> {
+  if (!dirs.length) return []
+  try {
+    await git(['rev-parse', '--verify', 'HEAD'])
+  } catch {
+    return []
+  }
+  const bad: string[] = []
+  for (const d of dirs) {
+    try {
+      // HEAD:<path> is always repo-root-relative; a directory is a tree, a file a blob.
+      if ((await git(['cat-file', '-t', `HEAD:${d}`])).trim() !== 'tree') bad.push(d)
+    } catch {
+      bad.push(d)
+    }
+  }
+  return bad
 }
 
 // ---- Project and workload ----
@@ -596,10 +620,16 @@ server.on('request', async (req, res) => {
     }
     if (req.method === 'POST' && url === '/api/project') {
       const { path: dir, agent, sparse } = await readBody(req)
-      // The picker's inputs win (they were prefilled from this folder's saved settings), then persist.
-      if (typeof agent === 'string') agentCmd = agent.trim() || 'claude'
-      if (typeof sparse === 'string') sparseCone = parseCone(sparse)
       const workloads = await openProject(dir)
+      // The picker's inputs win (they were prefilled from this folder's saved settings). Reject sparse
+      // dirs that don't exist in the repo before opening, so a worktree isn't cone-checked out to
+      // nothing; on rejection nothing is applied or saved, so the user can fix the input and retry.
+      const cone = typeof sparse === 'string' ? parseCone(sparse) : sparseCone
+      const bad = await invalidSparseDirs(cone)
+      if (bad.length)
+        return sendJson(res, 400, { error: `Sparse ${bad.length > 1 ? 'directories' : 'directory'} not found in the repo: ${bad.join(', ')}` })
+      if (typeof agent === 'string') agentCmd = agent.trim() || 'claude'
+      sparseCone = cone
       saveSettings()
       return sendJson(res, 200, { project: projectDir, workloads, agent: agentCmd, sparse: sparseCone.join(' ') })
     }
