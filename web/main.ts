@@ -419,6 +419,33 @@ function sendResize(t: Term) {
   }
 }
 
+// xterm draws its text to a canvas, so the browser can't select or copy it. Wire copy and paste
+// ourselves: any selection is copied to the clipboard (also on Cmd+C / Ctrl+Shift+C), and Ctrl+Shift+V
+// pastes from it (Cmd+V / Ctrl+V paste through xterm's own handler). When the agent's TUI turns on
+// mouse reporting, drags go to the app, not a selection — hold Shift while dragging to select then.
+function enableCopyPaste(term: Terminal) {
+  term.onSelectionChange(() => {
+    const sel = term.getSelection()
+    if (sel) navigator.clipboard?.writeText(sel).catch(() => {})
+  })
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== 'keydown') return true
+    // Cmd on macOS, Ctrl+Shift elsewhere — plain Ctrl+C stays an interrupt.
+    const copyMod = e.metaKey || (e.ctrlKey && e.shiftKey)
+    if (copyMod && e.code === 'KeyC' && term.hasSelection()) {
+      navigator.clipboard?.writeText(term.getSelection()).catch(() => {})
+      e.preventDefault()
+      return false
+    }
+    if (e.ctrlKey && e.shiftKey && e.code === 'KeyV') {
+      navigator.clipboard?.readText().then((t) => t && term.paste(t)).catch(() => {})
+      e.preventDefault()
+      return false
+    }
+    return true
+  })
+}
+
 // The terminal shown by default: an agent session on the main checkout.
 const mainTerm = { id: 'main', branch: 'main' }
 
@@ -434,6 +461,7 @@ function openTerminal(s: Pick<Session, 'id' | 'branch'>) {
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
+    enableCopyPaste(term)
     const ws = new WebSocket(wsUrl(`/pty/${s.id}`))
     t = { term, fit, ws, el }
     const cur = t
