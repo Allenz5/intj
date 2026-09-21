@@ -419,20 +419,32 @@ function sendResize(t: Term) {
   }
 }
 
-// xterm draws its text to a canvas, so the browser can't select or copy it. Wire copy and paste
-// ourselves: any selection is copied to the clipboard (also on Cmd+C / Ctrl+Shift+C), and Ctrl+Shift+V
-// pastes from it (Cmd+V / Ctrl+V paste through xterm's own handler). When the agent's TUI turns on
-// mouse reporting, drags go to the app, not a selection — hold Shift while dragging to select then.
-function enableCopyPaste(term: Terminal) {
+// xterm draws its text to a canvas, so the browser can't select or copy it, and the agent's TUI turns
+// on mouse reporting, which would send drags to the app instead of selecting. So: swallow the
+// mouse-tracking mode escapes so xterm never forwards drags — a plain drag then selects, with no
+// modifier key needed. Copy the selection to the clipboard (on select, and on Cmd+C / Ctrl+Shift+C),
+// paste on Ctrl+Shift+V (Cmd+V / Ctrl+V go through xterm's own handler), and map Shift+Enter to a
+// newline (ESC+CR, what Claude Code's terminal-setup binds it to).
+const MOUSE_MODES = [1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016]
+function enableCopyPaste(term: Terminal, send: (data: string) => void) {
+  for (const final of ['h', 'l'] as const) {
+    term.parser.registerCsiHandler({ prefix: '?', final }, (params) =>
+      params.length === 1 && typeof params[0] === 'number' && MOUSE_MODES.includes(params[0]),
+    )
+  }
   term.onSelectionChange(() => {
     const sel = term.getSelection()
     if (sel) navigator.clipboard?.writeText(sel).catch(() => {})
   })
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true
-    // Cmd on macOS, Ctrl+Shift elsewhere — plain Ctrl+C stays an interrupt.
-    const copyMod = e.metaKey || (e.ctrlKey && e.shiftKey)
-    if (copyMod && e.code === 'KeyC' && term.hasSelection()) {
+    if (e.key === 'Enter' && e.shiftKey) {
+      send('\x1b\r')
+      e.preventDefault()
+      return false
+    }
+    // Copy: Cmd on macOS, Ctrl+Shift elsewhere — plain Ctrl+C stays an interrupt.
+    if ((e.metaKey || (e.ctrlKey && e.shiftKey)) && e.code === 'KeyC' && term.hasSelection()) {
       navigator.clipboard?.writeText(term.getSelection()).catch(() => {})
       e.preventDefault()
       return false
@@ -457,17 +469,26 @@ function openTerminal(s: Pick<Session, 'id' | 'branch'>) {
     const el = document.createElement('div')
     el.className = 'term'
     $('terms').append(el)
-    const term = new Terminal({ fontFamily: 'Menlo, monospace', fontSize: 13, theme: { background: '#16181d' } })
+    // macOptionClickForcesSelection is a fallback for any mouse mode that slips through the filter.
+    const term = new Terminal({
+      fontFamily: 'Menlo, monospace',
+      fontSize: 13,
+      theme: { background: '#16181d' },
+      macOptionClickForcesSelection: true,
+    })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
-    enableCopyPaste(term)
     const ws = new WebSocket(wsUrl(`/pty/${s.id}`))
+    const send = (data: string) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data }))
+    }
+    enableCopyPaste(term, send)
     t = { term, fit, ws, el }
     const cur = t
     ws.onopen = () => sendResize(cur)
     ws.onmessage = (e) => term.write(e.data)
-    term.onData((data) => ws.send(JSON.stringify({ type: 'input', data })))
+    term.onData(send)
     terms.set(s.id, t)
   }
   for (const [id, x] of terms) x.el.hidden = id !== s.id
