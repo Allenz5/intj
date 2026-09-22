@@ -451,39 +451,13 @@ function sendResize(t: Term) {
   }
 }
 
-// xterm draws its text to a canvas, so the browser can't select or copy it, and the agent's TUI turns
-// on mouse reporting, which would send drags to the app instead of selecting. So: swallow the
-// mouse-tracking mode escapes so xterm never forwards drags — a plain drag then selects, with no
-// modifier key needed. Copy the selection to the clipboard (on select, and on Cmd+C / Ctrl+Shift+C),
-// paste on Ctrl+Shift+V (Cmd+V / Ctrl+V go through xterm's own handler), and map Shift+Enter to a
+// The agent's TUI turns on mouse reporting and uses it to select and edit text in its input, scroll,
+// etc. — so let xterm forward the mouse to it (a plain drag is the agent's, so selecting in the input
+// and deleting works). To still copy from the browser, hold Option (macOS, via
+// macOptionClickForcesSelection) or Shift (elsewhere) to drag out an xterm selection, which is copied
+// to the clipboard on select and on Cmd+C / Ctrl+Shift+C; Ctrl+Shift+V pastes; Shift+Enter is a
 // newline (ESC+CR, what Claude Code's terminal-setup binds it to).
-const MOUSE_MODES = [1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016]
 function enableCopyPaste(term: Terminal, send: (data: string) => void) {
-  // The agent's TUI turns on mouse reporting; keep that from xterm (so a plain drag selects text), but
-  // remember it — and whether SGR encoding is on — so the wheel can still be forwarded below.
-  let mouseOn = false
-  let sgrOn = false
-  for (const final of ['h', 'l'] as const) {
-    term.parser.registerCsiHandler({ prefix: '?', final }, (params) => {
-      if (!(params.length === 1 && typeof params[0] === 'number' && MOUSE_MODES.includes(params[0]))) return false
-      const on = final === 'h'
-      if ([1000, 1002, 1003].includes(params[0])) mouseOn = on
-      if ([1006, 1016].includes(params[0])) sgrOn = on
-      return true // swallow, so xterm never enters mouse mode
-    })
-  }
-  // With mouse reporting hidden from xterm, on the alternate screen xterm would turn the wheel into
-  // arrow keys — which the agent reads as input-history navigation. Instead forward the wheel to the
-  // agent as the mouse events it expects, so it scrolls its own transcript; with no mouse app, let
-  // xterm scroll its own scrollback.
-  term.attachCustomWheelEventHandler((e) => {
-    if (!mouseOn) return true
-    const btn = e.deltaY < 0 ? 64 : 65 // wheel up / down
-    const n = Math.min(5, Math.max(1, Math.round(Math.abs(e.deltaY) / 40)))
-    const seq = sgrOn ? `\x1b[<${btn};1;1M` : `\x1b[M${String.fromCharCode(32 + btn, 33, 33)}`
-    for (let i = 0; i < n; i++) send(seq)
-    return false
-  })
   term.onSelectionChange(() => {
     const sel = term.getSelection()
     if (sel) navigator.clipboard?.writeText(sel).catch(() => {})
