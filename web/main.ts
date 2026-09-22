@@ -121,12 +121,12 @@ function goToDoc(name: string) {
 const docFromUrl = () => new URLSearchParams(location.search).get('doc') ?? DEFAULT_DOC
 window.onpopstate = () => openDoc(docFromUrl())
 
-// Route link clicks so intj is never reloaded in place:
+// Route link clicks so opendoc is never reloaded in place:
 //  - an in-page anchor is left to the browser;
 //  - a relative link to a sibling .md doc opens that doc here;
 //  - an external URL opens in a new tab;
 //  - any other relative link (a repo source file the doc references) opens read-only in a new tab,
-//    rather than the browser navigating same-origin and the SPA server serving the intj app again.
+//    rather than the browser navigating same-origin and the SPA server serving the opendoc app again.
 $('preview').addEventListener('click', (e) => {
   const href = (e.target as HTMLElement).closest('a')?.getAttribute('href')
   if (!href || href.startsWith('#')) return
@@ -387,7 +387,7 @@ function layoutCards() {
   gutter.style.minHeight = `${floor}px`
   // Fork needs a card on this doc to pick.
   $<HTMLButtonElement>('popup-fork').disabled = !cards.length
-  CSS.highlights?.set('intj-quote', new Highlight(...ranges))
+  CSS.highlights?.set('opendoc-quote', new Highlight(...ranges))
 }
 window.addEventListener('resize', layoutCards)
 
@@ -400,7 +400,7 @@ const popupInput = $<HTMLInputElement>('popup-input')
 function showPopup(quote: string, range: Range | null, x: number, y: number) {
   pendingAnchor = range ? anchorOf($('preview'), range, quote) : { quote, prefix: '', suffix: '', pos: 0 }
   // Focusing the input clears the selection, so keep it visible as a highlight.
-  if (range) CSS.highlights?.set('intj-pending', new Highlight(range))
+  if (range) CSS.highlights?.set('opendoc-pending', new Highlight(range))
   popup.style.left = `${Math.min(x, window.innerWidth - 420)}px`
   popup.style.top = `${y + 6}px`
   popup.hidden = false
@@ -445,7 +445,7 @@ $('preview').addEventListener('contextmenu', (e) => {
 
 function hidePopup() {
   popup.hidden = true
-  CSS.highlights?.delete('intj-pending')
+  CSS.highlights?.delete('opendoc-pending')
 }
 document.addEventListener('mousedown', (e) => {
   if (!popup.contains(e.target as Node)) hidePopup()
@@ -497,7 +497,7 @@ $('popup-fork').onclick = () => {
 function stopForking() {
   forking = null
   document.body.classList.remove('forking')
-  CSS.highlights?.delete('intj-pending')
+  CSS.highlights?.delete('opendoc-pending')
 }
 function forkFrom(s: Session) {
   const { anchor, prompt } = forking!

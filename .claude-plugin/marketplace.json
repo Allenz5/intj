@@ -1,11 +1,11 @@
 {
-  "name": "intj",
+  "name": "opendoc",
   "owner": { "name": "Allenz5" },
   "plugins": [
     {
-      "name": "intj",
+      "name": "opendoc",
       "source": "./",
-      "description": "Skills for intj: update docs, resolve doc merge conflicts, split a doc."
+      "description": "Skills for opendoc: update docs, resolve doc merge conflicts, split a doc."
     }
   ]
 }

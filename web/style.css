@@ -64,8 +64,8 @@ body {
   font-family: Menlo, monospace;
   font-size: 12.5px;
 }
-::highlight(intj-quote),
-::highlight(intj-pending) {
+::highlight(opendoc-quote),
+::highlight(opendoc-pending) {
   background: #fbe7a6;
 }
 #gutter {

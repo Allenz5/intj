@@ -1,11 +1,11 @@
 ---
 name: update-docs
-description: Update the project's markdown docs so they describe the current state of the work. Use when the user says "/intj:update-docs", asks to update the docs, or when a piece of work is finished and the docs that govern it are now out of date.
+description: Update the project's markdown docs so they describe the current state of the work. Use when the user says "/opendoc:update-docs", asks to update the docs, or when a piece of work is finished and the docs that govern it are now out of date.
 ---
 
 # Update docs
 
-In an intj project the markdown docs are the interface between the user and the agent. They form a tree under the workload folder `.intj/<date-time>-<uuid>/`: `main.md` at the root, with child docs for submodules. Each doc describes what its part of the project is and does. This skill brings the docs back in line with the work.
+In an opendoc project the markdown docs are the interface between the user and the agent. They form a tree under the workload folder `.opendoc/<date-time>-<uuid>/`: `main.md` at the root, with child docs for submodules. Each doc describes what its part of the project is and does. This skill brings the docs back in line with the work.
 
 ## Steps
 

@@ -14,19 +14,19 @@ import pty, { type IPty } from 'node-pty'
 const startDir = path.resolve(process.argv[2] ?? process.cwd())
 // Both are chosen in the picker: the project folder, then a workload in it.
 let projectDir = ''
-// <project>/.intj/<date-time>-<uuid>: the workload's md docs, plus its sessions' worktrees.
+// <project>/.opendoc/<date-time>-<uuid>: the workload's md docs, plus its sessions' worktrees.
 let workloadDir = ''
 // The workload's path from the repo root, which is also where its docs sit in each worktree.
 let workloadRel = ''
 // The agent is just a command run in a terminal, so any CLI agent can be swapped in.
 // Mutable so the picker can set it before the main terminal starts.
-let agentCmd = process.env.INTJ_AGENT ?? 'claude'
+let agentCmd = process.env.OPENDOC_AGENT ?? 'claude'
 // Directories a session's worktree is cone-checked-out to; empty means a full checkout. Set from the
-// picker (or INTJ_SPARSE) to speed up worktree creation on a huge repo.
+// picker (or OPENDOC_SPARSE) to speed up worktree creation on a huge repo.
 const normDir = (d: string) => d.trim().replace(/\/+$/, '')
 // Multiple dirs, separated by whitespace, commas, or colons; trailing slashes trimmed.
 const parseCone = (s: string) => s.split(/[\s:,]+/).map(normDir).filter(Boolean)
-let sparseCone = parseCone(process.env.INTJ_SPARSE ?? '')
+let sparseCone = parseCone(process.env.OPENDOC_SPARSE ?? '')
 const port = Number(process.env.PORT ?? 5173)
 
 // Git runs off the event loop: on a large repo a status/worktree call takes seconds, and a
@@ -38,7 +38,7 @@ const git = async (args: string[], cwd = projectDir, env = process.env) =>
 // ---- Per-workload settings ----
 
 // Each workload keeps its own agent command and sparse dirs in its settings.json (untracked, like the
-// rest of .intj); a new workload copies the most recent one's (the picker seeds them). Applied to the
+// rest of .opendoc); a new workload copies the most recent one's (the picker seeds them). Applied to the
 // live agentCmd/sparseCone when the workload is opened, since sessions run against the open workload.
 type Settings = { agent: string; sparse: string[] }
 const settingsFile = (workloadDir: string) => path.join(workloadDir, 'settings.json')
@@ -92,11 +92,11 @@ async function openProject(dir: string) {
   } catch {
     await git(['init'])
   }
-  // The whole .intj tree stays out of git: docs are never committed or pushed, and each session's
+  // The whole .opendoc tree stays out of git: docs are never committed or pushed, and each session's
   // worktree gets them copied in. Doc changes are 3-way merged back with git merge-file, not git merge.
   const excludeFile = path.resolve(projectDir, (await git(['rev-parse', '--git-dir'])).trim(), 'info', 'exclude')
   let text = readDoc(excludeFile)
-  if (!/^\.intj\/?$/m.test(text)) text += '\n.intj/\n'
+  if (!/^\.opendoc\/?$/m.test(text)) text += '\n.opendoc/\n'
   fs.mkdirSync(path.dirname(excludeFile), { recursive: true })
   fs.writeFileSync(excludeFile, text)
   return listWorkloads()
@@ -105,7 +105,7 @@ async function openProject(dir: string) {
 // Newest first, each titled by its root doc's first heading, with its saved settings so the picker can
 // show them and seed a new workload from the most recent.
 function listWorkloads() {
-  const root = path.join(projectDir, '.intj')
+  const root = path.join(projectDir, '.opendoc')
   const ids = fs.existsSync(root) ? fs.readdirSync(root).filter((n) => WORKLOAD.test(n)).sort().reverse() : []
   return ids.map((id) => {
     const dir = path.join(root, id)
@@ -123,7 +123,7 @@ async function openWorkload(id?: string) {
     id = `${stamp}-${crypto.randomUUID()}`
   }
   if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
-  const dir = path.join(projectDir, '.intj', id)
+  const dir = path.join(projectDir, '.opendoc', id)
   if (!fs.existsSync(dir)) {
     // Docs are not tracked; a session's worktree gets them copied in, so no commit is needed.
     fs.mkdirSync(dir, { recursive: true })
@@ -137,7 +137,7 @@ async function openWorkload(id?: string) {
 // Delete a workload: end its sessions (dropping their worktrees/branches), then remove its folder.
 async function deleteWorkload(id: string) {
   if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
-  const dir = path.join(projectDir, '.intj', id)
+  const dir = path.join(projectDir, '.opendoc', id)
   for (const s of [...sessions.values()]) {
     if (s.worktree.startsWith(dir + path.sep)) await endSession(s)
   }
@@ -189,7 +189,7 @@ function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<strin
   // Sessions extend this object, so an id means this terminal is a session's.
   const id = (t as Partial<Session>).id ?? 'main'
   // Drop the markers that say "you're a nested child of this Claude Code session". Otherwise, when the
-  // intj server was itself launched from inside Claude Code/isaac, every agent inherits them, runs as
+  // opendoc server was itself launched from inside Claude Code/isaac, every agent inherits them, runs as
   // a child with transcript saving OFF, and its conversation is never saved — so it can't be resumed,
   // forked, or restored. Stripping them makes each agent an independent, saveable session. (Auth,
   // telemetry, and feature CLAUDE_CODE_* vars are left intact.)
@@ -274,12 +274,12 @@ const getMainTerm = () => {
     // avoid shell-quoting issues.
     const md = workloadDir && path.join(workloadDir, 'main.md')
     const prompt = md
-      ? `This project's working docs live in the .intj workload directory ${workloadDir}; its root doc is ${md}. ` +
+      ? `This project's working docs live in the .opendoc workload directory ${workloadDir}; its root doc is ${md}. ` +
         `Read ${md} and the docs it links to for context — just read them for now, don't reply. ` +
-        `As we work, when changes should be reflected in the docs, use the intj:update-docs skill to update the docs in ${workloadDir}.`
+        `As we work, when changes should be reflected in the docs, use the opendoc:update-docs skill to update the docs in ${workloadDir}.`
       : ''
-    const resume = prompt ? ' "$INTJ_PROMPT"' : ''
-    mainTerm = spawnAgent(projectDir, `${agentCmd} --session-id ${mainChat}${resume}`, prompt ? { INTJ_PROMPT: prompt } : {})
+    const resume = prompt ? ' "$OPENDOC_PROMPT"' : ''
+    mainTerm = spawnAgent(projectDir, `${agentCmd} --session-id ${mainChat}${resume}`, prompt ? { OPENDOC_PROMPT: prompt } : {})
   }
   return mainTerm
 }
@@ -331,7 +331,7 @@ function docsDiffer(s: Session) {
 // A 3-way merge of plain files via git merge-file (no repo needed); on conflict the returned text
 // carries conflict markers.
 async function mergeFile3(ours: string, base: string, theirs: string) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'intj-merge-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opendoc-merge-'))
   const o = path.join(tmp, 'ours')
   const b = path.join(tmp, 'base')
   const t = path.join(tmp, 'theirs')
@@ -503,7 +503,7 @@ function restoreSessions() {
       suffix: r.suffix ?? '',
       pos: r.pos ?? 0,
       prompt: r.prompt ?? '',
-      branch: r.branch ?? `intj/${r.id}`,
+      branch: r.branch ?? `opendoc/${r.id}`,
       worktree,
       chat: r.chat ?? '',
       docBase: r.docBase ?? {},
@@ -524,14 +524,14 @@ function restoreSessions() {
 
 // A commit of the worktree as it is now, uncommitted and untracked files included, leaving its index alone.
 async function snapshot(s: Pick<Session, 'id' | 'worktree'>) {
-  const index = path.join(os.tmpdir(), `intj-index-${crypto.randomUUID()}`)
+  const index = path.join(os.tmpdir(), `opendoc-index-${crypto.randomUUID()}`)
   const env = { ...process.env, GIT_INDEX_FILE: index }
   try {
     await git(['add', '-A'], s.worktree, env)
     const tree = (await git(['write-tree'], s.worktree, env)).trim()
     const head = (await git(['rev-parse', 'HEAD'], s.worktree)).trim()
     if (tree === (await git(['rev-parse', 'HEAD^{tree}'], s.worktree)).trim()) return head
-    return (await git(['commit-tree', tree, '-p', head, '-m', `intj ${s.id}: snapshot for fork`], s.worktree)).trim()
+    return (await git(['commit-tree', tree, '-p', head, '-m', `opendoc ${s.id}: snapshot for fork`], s.worktree)).trim()
   } finally {
     fs.rmSync(index, { force: true })
   }
@@ -561,11 +561,11 @@ function copyChat(chat: string, worktree: string) {
 function startSession(doc: string, anchor: Anchor, prompt: string, skill?: string, from?: Pick<Session, 'id' | 'worktree' | 'chat'>) {
   const { quote } = anchor
   const id = crypto.randomBytes(3).toString('hex')
-  const branch = `intj/${id}`
+  const branch = `opendoc/${id}`
   const worktree = path.join(workloadDir, 'worktrees', id)
   const chat = crypto.randomUUID()
   // For a skill the message leads with the slash command; this is also what the card shows.
-  const cmd = skill ? `/intj:${skill} ${prompt}`.trim() : prompt
+  const cmd = skill ? `/opendoc:${skill} ${prompt}`.trim() : prompt
   const s: Session = Object.assign(newTerm(), { id, doc, ...anchor, prompt: cmd, branch, worktree, chat, docBase: {} })
   sessions.set(id, s)
   broadcastSessions()
@@ -573,7 +573,7 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
   ;(async () => {
     try {
       const startPoint = from ? await snapshot(from) : 'HEAD'
-      // Materializing a huge repo's whole tree is the bottleneck. When INTJ_SPARSE names directories,
+      // Materializing a huge repo's whole tree is the bottleneck. When OPENDOC_SPARSE names directories,
       // do a cone checkout of just those (with a sparse index) so creation and later git ops touch far
       // fewer files; otherwise check out the full tree.
       const cone = sparseCone
@@ -601,7 +601,7 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       const file = path.join(worktree, workloadRel, doc)
       const context =
         `Doc: ${file}\n\n${quoted && `Selected text:\n${quoted}`}${prompt && `Comment: ${prompt}\n\n`}` +
-        `When done, use the intj:update-docs skill to update the markdown docs in ${path.dirname(file)}.`
+        `When done, use the opendoc:update-docs skill to update the markdown docs in ${path.dirname(file)}.`
       let text = skill ? `${cmd}\n\n${context}` : context
       // The forked conversation names the old worktree's paths, so point the agent at its own copy.
       if (from) text = `(Forked: you now work in ${worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
@@ -615,7 +615,7 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
         if (from) copyChat(from.chat, worktree)
         const resume = from ? `--resume ${from.chat} --fork-session ` : ''
         // Pass the prompt through the environment to avoid shell quoting issues.
-        startTerm(s, worktree, `${agentCmd} ${resume}--session-id ${chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+        startTerm(s, worktree, `${agentCmd} ${resume}--session-id ${chat} "$OPENDOC_PROMPT"`, { OPENDOC_PROMPT: text })
       }
       broadcastSessions()
     } catch (e) {
@@ -650,7 +650,7 @@ async function mergeSession(s: Session) {
   // Merge the code via git; docs are ignored, so only real code is committed and merged.
   await git(['add', '-A'], s.worktree)
   if ((await git(['status', '--porcelain'], s.worktree)).trim()) {
-    await git(['commit', '-m', `intj ${s.id}: ${s.prompt.split('\n')[0]}`], s.worktree)
+    await git(['commit', '-m', `opendoc ${s.id}: ${s.prompt.split('\n')[0]}`], s.worktree)
   }
   let codeConflict = false
   try {
@@ -682,13 +682,13 @@ function handOffConflicts(s: Session, docs: string[], code: boolean) {
   const codeText =
     'Merging the current branch into this worktree hit git conflicts (git status lists them). Resolve them ' +
     'keeping the intent of both sides, git add the files, then git commit --no-edit.'
-  const text = docs.length ? `/intj:merge-doc ${files}${code ? ` — then: ${codeText}` : ''}` : codeText
+  const text = docs.length ? `/opendoc:merge-doc ${files}${code ? ` — then: ${codeText}` : ''}` : codeText
   if (s.status === 'running') {
     s.term!.write(text)
     // Send Enter separately so the TUI doesn't treat it as part of a paste.
     setTimeout(() => s.term?.write('\r'), 300)
   } else {
-    startTerm(s, s.worktree, `${agentCmd} --resume ${s.chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+    startTerm(s, s.worktree, `${agentCmd} --resume ${s.chat} "$OPENDOC_PROMPT"`, { OPENDOC_PROMPT: text })
   }
 }
 
@@ -799,7 +799,7 @@ server.on('request', async (req, res) => {
     if (req.method === 'GET' && url === '/api/file') {
       // A doc's relative link to a repo file (e.g. a source file it references): serve it read-only so
       // clicking it shows the file, instead of the browser navigating same-origin and the SPA server
-      // reloading the intj app. Resolved relative to the doc and confined to the repo.
+      // reloading the opendoc app. Resolved relative to the doc and confined to the repo.
       const doc = searchParams.get('doc') ?? ''
       const href = (searchParams.get('href') ?? '').split('#')[0]
       const repoRoot = (await git(['rev-parse', '--show-toplevel'])).trim()

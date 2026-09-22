@@ -1,6 +1,6 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "intj", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev", "--", "."], "port": 5173 }
+    { "name": "opendoc", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev", "--", "."], "port": 5173 }
   ]
 }
