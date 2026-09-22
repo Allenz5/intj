@@ -162,21 +162,23 @@ type AgentTerm = {
   term: IPty | null
   buffer: string
   clients: Set<WebSocket>
+  // Flips busy→idle once the agent's output has gone quiet (see noteActivity).
+  idleTimer?: ReturnType<typeof setTimeout>
 }
 const MAX_BUFFER = 500_000
-// Claude Code hooks report the agent's state to /api/activity: a submitted prompt starts a turn, and
-// Stop (or StopFailure on an API error) ends it. An interrupted turn fires neither, so the idle_prompt
-// notification, sent once the agent has sat waiting for input a while, also marks it idle. The hook
-// settings are passed in through $INTJ_HOOKS, which startTerm sets per terminal.
-const agentWithHooks = () => `${agentCmd} --settings "$INTJ_HOOKS"`
-const hooksFor = (id: string) => {
-  const post = (busy: number) => [
-    { hooks: [{ type: 'command', command: `curl -s -m 2 -X POST 'http://127.0.0.1:${port}/api/activity/${id}?busy=${busy}' >/dev/null` }] },
-  ]
-  const idle = post(0)
-  return JSON.stringify({
-    hooks: { UserPromptSubmit: post(1), Stop: idle, StopFailure: idle, Notification: [{ ...idle[0], matcher: 'idle_prompt' }] },
-  })
+// Agents differ in how they resume/fork a conversation. isaac keeps its conversations in its own
+// (local or cloud) session store rather than Claude Code's <id>.jsonl, so forking uses
+// `isaac resume <id> --fork` instead of copying the transcript and passing --resume --fork-session.
+const agentIsIsaac = () => /(^|\/)isaac$/.test(agentCmd.trim().split(/\s+/)[0] ?? '')
+
+// Agent status is inferred generically from terminal output, not agent-specific hooks: while an agent
+// works it streams output, and while it waits for input the output goes quiet. So any output marks the
+// terminal busy, and after this much silence it's marked idle again — this works for any CLI agent.
+const IDLE_MS = 1200
+function noteActivity(t: AgentTerm, id: string) {
+  setBusy(id, true)
+  clearTimeout(t.idleTimer)
+  t.idleTimer = setTimeout(() => setBusy(id, false), IDLE_MS)
 }
 
 const newTerm = (): AgentTerm => ({ status: 'creating', busy: true, term: null, buffer: '', clients: new Set() })
@@ -186,14 +188,27 @@ const newTerm = (): AgentTerm => ({ status: 'creating', busy: true, term: null, 
 function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<string, string> = {}) {
   // Sessions extend this object, so an id means this terminal is a session's.
   const id = (t as Partial<Session>).id ?? 'main'
-  // Drop CLAUDECODE so an agent still starts when intj itself was launched from inside Claude Code.
-  const { CLAUDECODE, ...baseEnv } = process.env
+  // Drop the markers that say "you're a nested child of this Claude Code session". Otherwise, when the
+  // intj server was itself launched from inside Claude Code/isaac, every agent inherits them, runs as
+  // a child with transcript saving OFF, and its conversation is never saved — so it can't be resumed,
+  // forked, or restored. Stripping them makes each agent an independent, saveable session. (Auth,
+  // telemetry, and feature CLAUDE_CODE_* vars are left intact.)
+  const {
+    CLAUDECODE,
+    CLAUDE_CODE_CHILD_SESSION,
+    CLAUDE_CODE_SESSION_ID,
+    CLAUDE_CODE_SESSION_ATTENDED,
+    CLAUDE_CODE_ENTRYPOINT,
+    CLAUDE_CODE_MESSAGING_SOCKET,
+    CLAUDE_CODE_MESSAGING_TOKEN,
+    ...baseEnv
+  } = process.env
   const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', command], {
     name: 'xterm-256color',
     cwd,
     cols: 100,
     rows: 30,
-    env: { ...baseEnv, COLORTERM: 'truecolor', INTJ_HOOKS: hooksFor(id), ...env },
+    env: { ...baseEnv, COLORTERM: 'truecolor', ...env },
   })
   t.term = term
   t.status = 'running'
@@ -202,6 +217,8 @@ function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<strin
     // Keep recent output so a terminal opened later (or after a page reload) shows history.
     t.buffer = (t.buffer + data).slice(-MAX_BUFFER)
     for (const ws of t.clients) ws.send(data)
+    // Output means the agent is working; quiet means it's idle (see noteActivity).
+    noteActivity(t, id)
   })
   term.onExit(() => {
     t.status = 'exited'
@@ -213,7 +230,7 @@ function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<strin
 
 function setBusy(id: string, busy: boolean) {
   const t = id === 'main' ? mainTerm : sessions.get(id)
-  // An ended session is gone, so its late hooks are dropped.
+  // An ended session is gone, so its late output is ignored.
   if (!t || t.busy === busy) return
   t.busy = busy
   if (id !== 'main') {
@@ -230,6 +247,21 @@ function setBusy(id: string, busy: boolean) {
 const spawnAgent = (cwd: string, command: string, env: Record<string, string> = {}) =>
   startTerm(newTerm(), cwd, command, env)
 
+// Type `text` into a just-started terminal once its agent looks ready (output has arrived, then gone
+// quiet). For agents that can't take the prompt as a launch argument, e.g. isaac's `resume --fork`.
+function sendWhenReady(t: AgentTerm, text: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const sub = t.term?.onData(() => {
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      sub?.dispose()
+      t.term?.write(text)
+      // Send Enter separately so the TUI doesn't treat it as part of a paste.
+      setTimeout(() => t.term?.write('\r'), 300)
+    }, 1500)
+  })
+}
+
 // The default terminal: a plain agent session on the main checkout, restarted if it has exited. It
 // runs with a known session id so its conversation can be forked, like any other session.
 let mainTerm: AgentTerm | null = null
@@ -237,7 +269,17 @@ let mainChat = ''
 const getMainTerm = () => {
   if (mainTerm?.status !== 'running') {
     mainChat = crypto.randomUUID()
-    mainTerm = spawnAgent(projectDir, `${agentWithHooks()} --session-id ${mainChat}`)
+    // Prime the main agent with the open workload's docs so it starts with the same context, without
+    // producing a reply, and tell it to keep those docs current. Passed through the environment to
+    // avoid shell-quoting issues.
+    const md = workloadDir && path.join(workloadDir, 'main.md')
+    const prompt = md
+      ? `This project's working docs live in the .intj workload directory ${workloadDir}; its root doc is ${md}. ` +
+        `Read ${md} and the docs it links to for context — just read them for now, don't reply. ` +
+        `As we work, when changes should be reflected in the docs, use the intj:update-docs skill to update the docs in ${workloadDir}.`
+      : ''
+    const resume = prompt ? ' "$INTJ_PROMPT"' : ''
+    mainTerm = spawnAgent(projectDir, `${agentCmd} --session-id ${mainChat}${resume}`, prompt ? { INTJ_PROMPT: prompt } : {})
   }
   return mainTerm
 }
@@ -469,7 +511,7 @@ function restoreSessions() {
     sessions.set(r.id, s)
     if (s.chat) {
       // The conversation's jsonl still sits in this worktree's project dir, so --resume finds it.
-      startTerm(s, worktree, `${agentWithHooks()} --resume ${s.chat}`)
+      startTerm(s, worktree, `${agentCmd} --resume ${s.chat}`)
       // Resuming isn't a turn — the agent waits for input.
       s.busy = false
     } else {
@@ -563,10 +605,18 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       let text = skill ? `${cmd}\n\n${context}` : context
       // The forked conversation names the old worktree's paths, so point the agent at its own copy.
       if (from) text = `(Forked: you now work in ${worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
-      if (from) copyChat(from.chat, worktree)
-      const resume = from ? `--resume ${from.chat} --fork-session ` : ''
-      // Pass the prompt through the environment to avoid shell quoting issues.
-      startTerm(s, worktree, `${agentWithHooks()} ${resume}--session-id ${chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+      if (from && agentIsIsaac()) {
+        // isaac resolves the source by id (local or cloud) and branches it with `resume --fork`; the
+        // prompt can't be a launch argument, so type it in once the resumed session is ready. Status
+        // is tracked generically from output (noteActivity), so this path needs no special handling.
+        startTerm(s, worktree, `${agentCmd} resume ${from.chat} --fork`)
+        sendWhenReady(s, text)
+      } else {
+        if (from) copyChat(from.chat, worktree)
+        const resume = from ? `--resume ${from.chat} --fork-session ` : ''
+        // Pass the prompt through the environment to avoid shell quoting issues.
+        startTerm(s, worktree, `${agentCmd} ${resume}--session-id ${chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+      }
       broadcastSessions()
     } catch (e) {
       // Building the worktree failed: drop the placeholder card and report it.
@@ -638,7 +688,7 @@ function handOffConflicts(s: Session, docs: string[], code: boolean) {
     // Send Enter separately so the TUI doesn't treat it as part of a paste.
     setTimeout(() => s.term?.write('\r'), 300)
   } else {
-    startTerm(s, s.worktree, `${agentWithHooks()} --resume ${s.chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+    startTerm(s, s.worktree, `${agentCmd} --resume ${s.chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
   }
 }
 
@@ -733,10 +783,35 @@ server.on('request', async (req, res) => {
     if (req.method === 'GET' && url === '/api/doc') {
       return sendJson(res, 200, { text: readDoc(docFile(workloadDir, docName)) })
     }
-    const a = url.match(/^\/api\/activity\/(\w+)$/)
-    if (req.method === 'POST' && a) {
-      setBusy(a[1], searchParams.get('busy') === '1')
+    if (req.method === 'POST' && url === '/api/doc') {
+      // Save an edit to the workload's doc, then broadcast it and sync it into live sessions (the
+      // directory watcher is non-recursive, so do this explicitly rather than rely on it).
+      const { text } = await readBody(req)
+      const body = String(text ?? '')
+      const file = docFile(workloadDir, docName)
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, body)
+      lastText.set(docName, body) // pre-empt the watcher's duplicate broadcast
+      broadcast({ type: 'content', name: docName, text: body })
+      syncAllDocs()
       return sendJson(res, 200, { ok: true })
+    }
+    if (req.method === 'GET' && url === '/api/file') {
+      // A doc's relative link to a repo file (e.g. a source file it references): serve it read-only so
+      // clicking it shows the file, instead of the browser navigating same-origin and the SPA server
+      // reloading the intj app. Resolved relative to the doc and confined to the repo.
+      const doc = searchParams.get('doc') ?? ''
+      const href = (searchParams.get('href') ?? '').split('#')[0]
+      const repoRoot = (await git(['rev-parse', '--show-toplevel'])).trim()
+      const target = path.resolve(path.dirname(path.resolve(workloadDir, doc)), href)
+      if (target !== repoRoot && !target.startsWith(repoRoot + path.sep)) return sendJson(res, 400, { error: 'outside the repo' })
+      try {
+        const data = fs.readFileSync(target)
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+        return res.end(data)
+      } catch {
+        return sendJson(res, 404, { error: `not found: ${href}` })
+      }
     }
     if (req.method === 'POST' && url === '/api/sessions') {
       const { doc, anchor, prompt, skill, from } = await readBody(req)

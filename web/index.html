@@ -42,8 +42,12 @@
           <span id="doc-name"></span>
           <span class="spacer"></span>
           <button id="doc-up" hidden>Back</button>
+          <button id="doc-edit">Edit</button>
+          <button id="doc-save" hidden>Save</button>
+          <button id="doc-cancel" hidden>Cancel</button>
         </header>
         <div id="doc-scroll">
+          <textarea id="doc-editor" spellcheck="false" hidden></textarea>
           <div id="doc-body">
             <article id="preview"></article>
             <aside id="gutter"></aside>
@@ -65,6 +69,7 @@
       <button id="popup-start">Start chat</button>
       <button id="popup-fork" title="Then click a comment on the right to continue from its files and conversation">Fork chat</button>
       <button id="popup-split" title="Shorten the selected module here and move its detail into a linked child doc">Split doc</button>
+      <button id="popup-copy" title="Copy the selected text (or press Cmd/Ctrl+C)">Copy</button>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>

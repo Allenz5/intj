@@ -18,6 +18,9 @@ let sessions: Session[] = []
 let mainBusy = false
 // Id of the session whose worktree doc is shown while its Merge button is hovered.
 let previewing: string | null = null
+// Whether the doc is being edited as raw markdown, and the current doc's parent (for the Back button).
+let editing = false
+let docParent: string | null = null
 
 // ---- Document ----
 
@@ -26,6 +29,8 @@ const onEvent = (e: MessageEvent) => {
   if (msg.type === 'content') {
     if (msg.name !== docName) return
     docText = msg.text
+    // Don't disturb an in-progress edit; the editor keeps the user's text until they save or cancel.
+    if (editing) return
     // A merge while hovering changes the main doc, so re-diff against it.
     const s = sessions.find((x) => x.id === previewing)
     if (s) showWorktreeDoc(s)
@@ -55,6 +60,7 @@ const onEvent = (e: MessageEvent) => {
 }
 
 async function openDoc(name: string) {
+  if (editing) setEditing(false)
   docName = name
   const { text } = await (await fetch(`/api/doc?name=${encodeURIComponent(name)}`)).json()
   // Another link may have been clicked while fetching.
@@ -65,9 +71,48 @@ async function openDoc(name: string) {
   renderCards()
   const { parent } = await (await fetch(`/api/parent?name=${encodeURIComponent(name)}`)).json()
   if (docName !== name) return
-  $('doc-up').hidden = !parent
+  docParent = parent
+  $('doc-up').hidden = !parent || editing
   $('doc-up').title = parent ?? ''
   $('doc-up').onclick = () => goToDoc(parent)
+}
+
+// ---- Editing the raw markdown ----
+
+const docEditor = $<HTMLTextAreaElement>('doc-editor')
+function setEditing(on: boolean) {
+  editing = on
+  if (on) docEditor.value = docText
+  docEditor.hidden = !on
+  $('doc-body').hidden = on
+  $('doc-edit').hidden = on
+  $('doc-save').hidden = !on
+  $('doc-cancel').hidden = !on
+  $('doc-up').hidden = on || !docParent
+  if (on) docEditor.focus()
+  else showMainDoc() // re-render from docText
+}
+async function saveDoc() {
+  const text = docEditor.value
+  const res = await fetch(`/api/doc?name=${encodeURIComponent(docName)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
+  })
+  const data = await res.json()
+  if (!res.ok) return alert(data.error)
+  docText = text
+  setEditing(false)
+}
+$('doc-edit').onclick = () => setEditing(true)
+$('doc-cancel').onclick = () => setEditing(false)
+$('doc-save').onclick = saveDoc
+// Cmd/Ctrl+S saves while editing.
+docEditor.onkeydown = (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+    e.preventDefault()
+    saveDoc()
+  }
 }
 function goToDoc(name: string) {
   history.pushState(null, '', `?doc=${encodeURIComponent(name)}`)
@@ -76,14 +121,27 @@ function goToDoc(name: string) {
 const docFromUrl = () => new URLSearchParams(location.search).get('doc') ?? DEFAULT_DOC
 window.onpopstate = () => openDoc(docFromUrl())
 
-// A relative link to an md file opens that doc in place, resolved against the current doc's folder.
+// Route link clicks so intj is never reloaded in place:
+//  - an in-page anchor is left to the browser;
+//  - a relative link to a sibling .md doc opens that doc here;
+//  - an external URL opens in a new tab;
+//  - any other relative link (a repo source file the doc references) opens read-only in a new tab,
+//    rather than the browser navigating same-origin and the SPA server serving the intj app again.
 $('preview').addEventListener('click', (e) => {
   const href = (e.target as HTMLElement).closest('a')?.getAttribute('href')
-  if (!href || /^([a-z]+:|\/|#)/i.test(href)) return
-  const file = href.split('#')[0]
-  if (!file.endsWith('.md')) return
+  if (!href || href.startsWith('#')) return
+  if (/^[a-z]+:/i.test(href)) {
+    e.preventDefault()
+    window.open(href, '_blank', 'noopener')
+    return
+  }
   e.preventDefault()
-  goToDoc(decodeURIComponent(new URL(file, `http://x/${docName}`).pathname.slice(1)))
+  const file = href.split('#')[0]
+  if (file.endsWith('.md')) {
+    goToDoc(decodeURIComponent(new URL(file, `http://x/${docName}`).pathname.slice(1)))
+  } else {
+    window.open(`/api/file?doc=${encodeURIComponent(docName)}&href=${encodeURIComponent(href)}`, '_blank', 'noopener')
+  }
 })
 
 function showMainDoc() {
@@ -410,9 +468,21 @@ async function startChat(skill?: string, from?: string, anchor = pendingAnchor, 
 }
 $('popup-start').onclick = () => startChat()
 $('popup-split').onclick = () => startChat('split-doc')
+// Copy the selected text: the popup steals focus from the document (to type a comment), which clears
+// the browser selection, so Cmd/Ctrl+C wouldn't copy it — copy the captured quote instead.
+const copyQuote = () => {
+  if (pendingAnchor.quote) navigator.clipboard?.writeText(pendingAnchor.quote).catch(() => {})
+  hidePopup()
+}
+$('popup-copy').onclick = copyQuote
 popupInput.onkeydown = (e) => {
   if (e.key === 'Enter' && !e.isComposing) startChat()
   if (e.key === 'Escape') hidePopup()
+  // Copy the selection unless the user has selected text within the input itself.
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C') && popupInput.selectionStart === popupInput.selectionEnd) {
+    e.preventDefault()
+    copyQuote()
+  }
 }
 
 // Fork chat: keep the selection and prompt, then wait for a card to be clicked.
