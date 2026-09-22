@@ -114,8 +114,10 @@ function listWorkloads() {
   })
 }
 
-// Open a workload, or create one when no id is given.
+// Open a workload, or create one when no id is given. Switching tabs leaves the previous workload's
+// agents alive (see mains/sessions); only its session metadata is persisted here before we switch.
 async function openWorkload(id?: string) {
+  if (workloadDir) saveSessions()
   if (!id) {
     const d = new Date()
     const p = (n: number) => String(n).padStart(2, '0')
@@ -138,6 +140,11 @@ async function openWorkload(id?: string) {
 async function deleteWorkload(id: string) {
   if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
   const dir = path.join(projectDir, '.opendoc', id)
+  const m = mains.get(id)
+  if (m) {
+    m.term?.kill()
+    mains.delete(id)
+  }
   for (const s of [...sessions.values()]) {
     if (s.worktree.startsWith(dir + path.sep)) await endSession(s)
   }
@@ -150,6 +157,35 @@ async function deleteWorkload(id: string) {
     workloadRel = ''
   }
   return listWorkloads()
+}
+
+// Close a workload's tab: stop its main agent and session agents, but leave everything on disk — its
+// docs, worktrees, saved sessions, and the main agent's conversation id all persist, so reopening the
+// tab restores the cards and resumes every agent. (Contrast deleteWorkload, which removes the folder.)
+function closeWorkload(id: string) {
+  if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
+  const dir = path.join(projectDir, '.opendoc', id)
+  // Clear the active pointer first, so a terminal's exit doesn't persist an emptied session list.
+  if (workloadDir === dir) {
+    closeDocWatcher()
+    workloadDir = ''
+    workloadRel = ''
+  }
+  const m = mains.get(id)
+  if (m) {
+    m.term?.kill()
+    for (const ws of m.clients) ws.close()
+    mains.delete(id)
+  }
+  for (const s of [...sessions.values()]) {
+    if (s.worktree.startsWith(dir + path.sep)) {
+      s.term?.kill()
+      for (const ws of s.clients) ws.close()
+      sessions.delete(s.id)
+      unmergedCache.delete(s.id)
+    }
+  }
+  broadcast({ type: 'sessions', list: activeSessions().map(publicSession) })
 }
 
 // ---- Agent terminals ----
@@ -170,6 +206,8 @@ const MAX_BUFFER = 500_000
 // (local or cloud) session store rather than Claude Code's <id>.jsonl, so forking uses
 // `isaac resume <id> --fork` instead of copying the transcript and passing --resume --fork-session.
 const agentIsIsaac = () => /(^|\/)isaac$/.test(agentCmd.trim().split(/\s+/)[0] ?? '')
+// Resuming a saved conversation: isaac uses a `resume <id>` subcommand, Claude Code a `--resume <id>` flag.
+const resumeCmd = (chat: string) => (agentIsIsaac() ? `${agentCmd} resume ${chat}` : `${agentCmd} --resume ${chat}`)
 
 // Agent status is inferred generically from terminal output, not agent-specific hooks: while an agent
 // works it streams output, and while it waits for input the output goes quiet. So any output marks the
@@ -223,25 +261,36 @@ function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<strin
   term.onExit(() => {
     t.status = 'exited'
     for (const ws of t.clients) ws.send('\r\n[process exited]\r\n')
-    broadcastSessions()
+    // A main term reports its own state; a session's exit changes the session list.
+    if (id.startsWith('main:')) {
+      if (id.slice(5) === activeWid()) broadcast({ type: 'main', busy: false, status: 'exited' })
+    } else broadcastSessions()
   })
   return t
 }
 
 function setBusy(id: string, busy: boolean) {
-  const t = id === 'main' ? mainTerm : sessions.get(id)
+  // A main term's id is `main:<workload>`, so its state only reaches the client while that workload is
+  // the active tab (each workload keeps its own always-on main agent, but only one is shown at a time).
+  if (id.startsWith('main:')) {
+    const wid = id.slice(5)
+    const m = mains.get(wid)
+    if (!m || m.busy === busy) return
+    m.busy = busy
+    if (wid === activeWid()) {
+      broadcast({ type: 'main', busy, status: m.status })
+      // The main terminal may have just merged a handed-off session.
+      if (!busy) broadcastSessions()
+    }
+    return
+  }
+  const t = sessions.get(id)
   // An ended session is gone, so its late output is ignored.
   if (!t || t.busy === busy) return
   t.busy = busy
-  if (id !== 'main') {
-    broadcast({ type: 'activity', id, busy, unmerged: unmergedCache.get(id) ?? false })
-    // Recompute the merge state off the event loop rather than blocking on git here.
-    refreshUnmerged(t as Session)
-  } else {
-    broadcast({ type: 'main', busy, status: mainTerm!.status })
-    // The main terminal may have just merged a handed-off session.
-    if (!busy) broadcastSessions()
-  }
+  broadcast({ type: 'activity', id, busy, unmerged: unmergedCache.get(id) ?? false })
+  // Recompute the merge state off the event loop rather than blocking on git here.
+  refreshUnmerged(t as Session)
 }
 
 const spawnAgent = (cwd: string, command: string, env: Record<string, string> = {}) =>
@@ -262,13 +311,44 @@ function sendWhenReady(t: AgentTerm, text: string) {
   })
 }
 
-// The default terminal: a plain agent session on the main checkout, restarted if it has exited. It
-// runs with a known session id so its conversation can be forked, like any other session.
-let mainTerm: AgentTerm | null = null
-let mainChat = ''
-const getMainTerm = () => {
-  if (mainTerm?.status !== 'running') {
-    mainChat = crypto.randomUUID()
+// The always-on main agent: a plain agent session on the main checkout, and the doc's persistent
+// comment block. Each workload keeps its own, so switching tabs leaves the others' agents running; a
+// closed tab's agent is killed but its conversation id is saved, so reopening resumes it. Keyed by
+// workload id; the active workload's is the one the client's `main` terminal talks to.
+type Main = AgentTerm & { chat: string }
+const mains = new Map<string, Main>()
+const activeWid = () => (workloadDir ? path.basename(workloadDir) : '')
+// The conversation id persists next to the workload's docs (untracked), so a reopened workload resumes
+// the same main-agent conversation rather than starting a fresh one.
+const mainChatFile = (dir: string) => path.join(dir, 'main-chat')
+const loadMainChat = (dir: string) => {
+  try {
+    return fs.readFileSync(mainChatFile(dir), 'utf8').trim()
+  } catch {
+    return ''
+  }
+}
+const saveMainChat = (dir: string, chat: string) => {
+  try {
+    fs.writeFileSync(mainChatFile(dir), chat)
+  } catch {}
+}
+
+function getMainTerm(): Main {
+  const wid = activeWid()
+  let m = mains.get(wid)
+  if (m && m.status === 'running') return m
+  // Resume a saved conversation if this workload has one; otherwise start a fresh one and prime it.
+  const saved = m?.chat || loadMainChat(workloadDir)
+  const chat = saved || crypto.randomUUID()
+  m = Object.assign(m ?? newTerm(), { chat, id: `main:${wid}` }) as Main
+  mains.set(wid, m)
+  saveMainChat(workloadDir, chat)
+  if (saved) {
+    // The conversation already has the docs' context; just resume it.
+    startTerm(m, projectDir, resumeCmd(chat))
+    m.busy = false
+  } else {
     // Prime the main agent with the open workload's docs so it starts with the same context, without
     // producing a reply, and tell it to keep those docs current. Passed through the environment to
     // avoid shell-quoting issues.
@@ -278,10 +358,10 @@ const getMainTerm = () => {
         `Read ${md} and the docs it links to for context — just read them for now, don't reply. ` +
         `As we work, when changes should be reflected in the docs, use the opendoc:update-docs skill to update the docs in ${workloadDir}.`
       : ''
-    const resume = prompt ? ' "$OPENDOC_PROMPT"' : ''
-    mainTerm = spawnAgent(projectDir, `${agentCmd} --session-id ${mainChat}${resume}`, prompt ? { OPENDOC_PROMPT: prompt } : {})
+    const arg = prompt ? ' "$OPENDOC_PROMPT"' : ''
+    startTerm(m, projectDir, `${agentCmd} --session-id ${chat}${arg}`, prompt ? { OPENDOC_PROMPT: prompt } : {})
   }
-  return mainTerm
+  return m
 }
 
 // ---- Sessions: one agent terminal per worktree ----
@@ -458,9 +538,12 @@ const publicSession = (s: Session) => {
   const { id, doc, quote, prefix, suffix, pos, prompt, branch, status, busy } = s
   return { id, doc, quote, prefix, suffix, pos, prompt, branch, status, busy, unmerged: unmergedCache.get(id) ?? false }
 }
+// Only the active workload's sessions are shown/broadcast; the others' agents stay alive in the map
+// but belong to background tabs.
+const activeSessions = () => [...sessions.values()].filter((s) => !!workloadDir && s.worktree.startsWith(workloadDir + path.sep))
 const broadcastSessions = () => {
   saveSessions()
-  broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
+  broadcast({ type: 'sessions', list: activeSessions().map(publicSession) })
 }
 
 // ---- Restoring sessions ----
@@ -510,8 +593,8 @@ function restoreSessions() {
     })
     sessions.set(r.id, s)
     if (s.chat) {
-      // The conversation's jsonl still sits in this worktree's project dir, so --resume finds it.
-      startTerm(s, worktree, `${agentCmd} --resume ${s.chat}`)
+      // The conversation's jsonl still sits in this worktree's project dir, so resuming finds it.
+      startTerm(s, worktree, resumeCmd(s.chat))
       // Resuming isn't a turn — the agent waits for input.
       s.busy = false
     } else {
@@ -754,6 +837,9 @@ server.on('request', async (req, res) => {
     }
     if (req.method === 'POST' && url === '/api/workload') {
       const { id, agent, sparse } = await readBody(req)
+      // No project open (e.g. the server was restarted while the browser kept the picker open): bail
+      // clearly instead of running git — and thus the sparse-dir check — against the wrong directory.
+      if (!projectDir) return sendJson(res, 409, { error: 'no project open' })
       // The agent command and sparse dirs come from the picker (the config it shows for this workload,
       // seeded from the most recent one for a new workload). Reject sparse dirs that don't exist in the
       // repo before opening, so a session's worktree isn't cone-checked out to nothing.
@@ -773,6 +859,19 @@ server.on('request', async (req, res) => {
       saveSettings()
       // Bring back any sessions this workload had open (agentCmd is now set, so they resume correctly).
       restoreSessions()
+      // Always refresh the client with this workload's cards (restoreSessions is silent when a workload
+      // has none) and its main-agent state (its terminal spawns lazily, so report idle until then).
+      broadcast({ type: 'sessions', list: activeSessions().map(publicSession) })
+      const am = mains.get(activeWid())
+      broadcast({ type: 'main', busy: am?.busy ?? false, status: am?.status ?? 'idle' })
+      return sendJson(res, 200, { ok: true, id: activeWid() })
+    }
+    if (req.method === 'GET' && url === '/api/workloads') {
+      return sendJson(res, 200, { workloads: projectDir ? listWorkloads() : [], active: activeWid(), project: projectDir })
+    }
+    if (req.method === 'POST' && url === '/api/workload/close') {
+      const { id } = await readBody(req)
+      closeWorkload(id)
       return sendJson(res, 200, { ok: true })
     }
     if (req.method === 'POST' && url === '/api/workload/delete') {
@@ -817,9 +916,10 @@ server.on('request', async (req, res) => {
       const { doc, anchor, prompt, skill, from } = await readBody(req)
       let src: Pick<Session, 'id' | 'worktree' | 'chat'> | undefined
       if (from === 'main') {
-        // Fork from the main agent: its checkout and conversation are the source.
-        if (!mainChat) return sendJson(res, 400, { error: 'Open the main agent and send it a message before forking from it' })
-        src = { id: 'main', worktree: projectDir, chat: mainChat }
+        // Fork from the active workload's main agent: its checkout and conversation are the source.
+        const chat = mains.get(activeWid())?.chat
+        if (!chat) return sendJson(res, 400, { error: 'Open the main agent and send it a message before forking from it' })
+        src = { id: 'main', worktree: projectDir, chat }
       } else if (from) {
         src = sessions.get(from)
         if (!src) return sendJson(res, 404, { error: `no session ${from}` })
@@ -914,8 +1014,9 @@ const watchDocs = () => {
 const eventsWss = new WebSocketServer({ noServer: true })
 eventsWss.on('connection', (ws) => {
   eventClients.add(ws)
-  ws.send(JSON.stringify({ type: 'sessions', list: [...sessions.values()].map(publicSession) }))
-  ws.send(JSON.stringify({ type: 'main', busy: mainTerm?.busy ?? false, status: mainTerm?.status ?? 'idle' }))
+  const am = mains.get(activeWid())
+  ws.send(JSON.stringify({ type: 'sessions', list: activeSessions().map(publicSession) }))
+  ws.send(JSON.stringify({ type: 'main', busy: am?.busy ?? false, status: am?.status ?? 'idle' }))
   ws.on('close', () => eventClients.delete(ws))
 })
 

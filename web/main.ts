@@ -22,6 +22,17 @@ let previewing: string | null = null
 let editing = false
 let docParent: string | null = null
 
+// ---- Workload tabs ----
+// Open tabs are the workloads shown in the top bar (persisted per project in localStorage). Only the
+// active one is live on the client; switching keeps the others' agents running on the server, and
+// closing a tab stops its agents — they resume from their saved ids when the tab is reopened.
+let openTabs: string[] = []
+let activeWorkload = ''
+let allWorkloads: WorkloadInfo[] = []
+let clientProject = ''
+let pickerMode: 'start' | 'add' = 'start'
+let eventsWs: WebSocket | null = null
+
 // ---- Document ----
 
 const onEvent = (e: MessageEvent) => {
@@ -666,6 +677,162 @@ $('divider').onpointerdown = (e) => {
   }
 }
 
+// ---- Workload tabs ----
+
+const tabsKey = () => `opendoc:tabs:${clientProject}`
+function loadTabs() {
+  try {
+    const v = JSON.parse(localStorage.getItem(tabsKey()) || '[]')
+    openTabs = Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []
+  } catch {
+    openTabs = []
+  }
+}
+const saveTabs = () => {
+  try {
+    localStorage.setItem(tabsKey(), JSON.stringify(openTabs))
+  } catch {}
+}
+function addTab(id: string) {
+  if (!openTabs.includes(id)) {
+    openTabs.push(id)
+    saveTabs()
+  }
+}
+function removeTab(id: string) {
+  openTabs = openTabs.filter((x) => x !== id)
+  saveTabs()
+}
+
+// A tab's label: the workload's doc title, else its date-time from the id.
+function tabTitle(id: string) {
+  const w = allWorkloads.find((x) => x.id === id)
+  if (w?.title) return w.title
+  const m = id.match(/^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)/)
+  return m ? `${m[2]}-${m[3]} ${m[4]}:${m[5]}` : id
+}
+
+function renderTabs() {
+  $('tabs').replaceChildren(
+    ...openTabs.map((id) => {
+      const tab = document.createElement('div')
+      tab.className = 'tab' + (id === activeWorkload ? ' active' : '')
+      tab.title = id
+      // The whole tab switches; only the close button (below) is exempt.
+      tab.onclick = () => switchWorkload(id)
+      const label = document.createElement('span')
+      label.className = 'tab-label'
+      label.textContent = tabTitle(id)
+      const close = document.createElement('button')
+      close.className = 'tab-close'
+      close.textContent = '×'
+      close.title = 'Close workload'
+      close.onclick = (e) => {
+        e.stopPropagation()
+        closeTab(id)
+      }
+      tab.append(label, close)
+      return tab
+    }),
+  )
+}
+
+// Fetch the project's workloads (for tab titles) and drop tabs whose workload no longer exists.
+async function refreshWorkloads() {
+  const data = await (await fetch('/api/workloads')).json()
+  allWorkloads = data.workloads ?? []
+  if (data.project) clientProject = data.project
+  openTabs = openTabs.filter((id) => allWorkloads.some((w: WorkloadInfo) => w.id === id))
+  saveTabs()
+  renderTabs()
+}
+
+// (Re)connect the events socket, e.g. after the server was restarted and the old one closed.
+function ensureEventsWs() {
+  if (eventsWs && eventsWs.readyState <= WebSocket.OPEN) return
+  eventsWs = new WebSocket(wsUrl('/events'))
+  eventsWs.onmessage = onEvent
+}
+
+// The server forgets the open project when it restarts, while the browser keeps it cached — so any
+// project-scoped call (opening a workload, the sparse-dir check) would run against the wrong directory.
+// Re-establish the project first so it runs against the right repo. Returns false if we can't.
+async function ensureProject(): Promise<boolean> {
+  if (!clientProject) return false
+  const data = await (await fetch('/api/workloads')).json()
+  if (data.project) return true
+  const res = await post('/api/project', { path: clientProject })
+  return res.ok
+}
+
+// Dispose every open terminal — session ids and the main terminal differ per workload.
+function resetTerminals() {
+  for (const [, t] of terms) {
+    t.ws.close()
+    t.term.dispose()
+    t.el.remove()
+  }
+  terms.clear()
+  activeId = null
+}
+
+// Reflect a workload the server has just made active: reset the view to it. The server broadcasts the
+// workload's session list and main-agent state, so we don't clear the cards here (that would wipe a
+// list that may have already arrived); the root doc is reopened fresh.
+function applySwitch(id: string) {
+  activeWorkload = id
+  addTab(id)
+  renderTabs()
+  ensureEventsWs()
+  history.replaceState(null, '', location.pathname)
+  mainBusy = false
+  resetTerminals()
+  openDoc(DEFAULT_DOC)
+  openTerminal(mainTerm)
+}
+
+async function switchWorkload(id: string) {
+  if (id === activeWorkload) return
+  if (!(await ensureProject())) return alert('Reopen the project folder first')
+  const res = await post('/api/workload', { id })
+  const data = await res.json()
+  if (!res.ok) return alert(data.error)
+  applySwitch(id)
+  refreshWorkloads()
+}
+
+async function closeTab(id: string) {
+  await post('/api/workload/close', { id })
+  removeTab(id)
+  if (id !== activeWorkload) return renderTabs()
+  // Closing the active tab: move to another open one, or fall back to the picker.
+  activeWorkload = ''
+  const next = openTabs[0]
+  if (next) return switchWorkload(next)
+  resetTerminals()
+  renderTabs()
+  openPickerForAdd()
+}
+
+// The + button: choose or create a workload to open as a new tab (the project is already picked).
+async function openPickerForAdd() {
+  await refreshWorkloads()
+  workloads = allWorkloads
+  pickerMode = 'add'
+  $('pick-folder').hidden = true
+  $('pick-workload').hidden = false
+  $('workload-cancel').hidden = false
+  $('workload-project').textContent = clientProject
+  renderWorkloads()
+  selectNew()
+  $('picker').hidden = false
+}
+$('tab-add').onclick = () => openPickerForAdd()
+// Cancel only dismisses when there's an active workload to return to (the initial pick has none).
+$('workload-cancel').onclick = () => {
+  if (activeWorkload) $('picker').hidden = true
+}
+
 // ---- Picker: choose a project folder, then a workload in it ----
 
 const post = (url: string, body: unknown) =>
@@ -698,8 +865,13 @@ async function chooseProject(dir: string) {
   const res = await post('/api/project', { path: dir })
   const data = await res.json()
   if (!res.ok) return alert(data.error)
+  clientProject = data.project
+  loadTabs()
+  allWorkloads = data.workloads
+  pickerMode = 'start'
   $('pick-folder').hidden = true
   $('pick-workload').hidden = false
+  $('workload-cancel').hidden = true
   $('workload-project').textContent = data.project
   workloads = data.workloads
   renderWorkloads()
@@ -732,6 +904,10 @@ function renderWorkloads() {
         const out = await r.json()
         if (!r.ok) return alert(out.error)
         workloads = out.workloads
+        allWorkloads = out.workloads
+        removeTab(w.id)
+        if (activeWorkload === w.id) activeWorkload = ''
+        renderTabs()
         renderWorkloads()
         if (selectedId === w.id) selectNew()
       }
@@ -773,6 +949,7 @@ function selectNew() {
 $('workload-new').onclick = selectNew
 
 $('workload-open').onclick = async () => {
+  if (!(await ensureProject())) return alert('Reopen the project folder first')
   const res = await post('/api/workload', {
     id: selectedId ?? undefined,
     agent: pickerAgentInput.value,
@@ -780,22 +957,35 @@ $('workload-open').onclick = async () => {
   })
   const data = await res.json()
   if (!res.ok) return alert(data.error)
-  start()
+  $('picker').hidden = true
+  if (pickerMode === 'start') start(data.id)
+  else applySwitch(data.id)
+  refreshWorkloads()
 }
 
-function start() {
+function start(active: string) {
   $('picker').hidden = true
   $('app').hidden = false
-  new WebSocket(wsUrl('/events')).onmessage = onEvent
+  ensureEventsWs()
+  activeWorkload = active
+  addTab(active)
+  renderTabs()
   openDoc(docFromUrl())
   openTerminal(mainTerm)
 }
 
-// A reload after choosing goes straight back to the workload.
-fetch('/api/state')
-  .then((r) => r.json())
-  .then(({ workload }) => {
-    if (workload) return start()
+// A reload goes straight back to the active workload, restoring the project's tab bar.
+async function boot() {
+  const data = await (await fetch('/api/workloads')).json()
+  allWorkloads = data.workloads ?? []
+  clientProject = data.project || ''
+  if (data.active) {
+    loadTabs()
+    start(data.active)
+    refreshWorkloads()
+  } else {
     $('picker').hidden = false
     showDir('')
-  })
+  }
+}
+boot()

@@ -31,12 +31,20 @@
               </div>
               <div id="sparse-list"></div>
             </div>
-            <button id="workload-open">Open workload</button>
+            <div class="workload-buttons">
+              <button id="workload-open">Open workload</button>
+              <button id="workload-cancel" hidden>Cancel</button>
+            </div>
           </div>
         </section>
       </div>
     </div>
     <div id="app" hidden>
+      <div id="tabbar">
+        <div id="tabs"></div>
+        <button id="tab-add" title="Open or create a workload">+</button>
+      </div>
+      <div id="workspace">
       <section id="doc">
         <header class="bar">
           <span id="doc-name"></span>
@@ -63,6 +71,7 @@
         </header>
         <div id="terms"></div>
       </section>
+      </div>
     </div>
     <div id="popup" hidden>
       <input id="popup-input" placeholder="What should Claude do?" autocomplete="off" />

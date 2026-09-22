@@ -16,7 +16,78 @@ body {
 }
 #app {
   display: flex;
+  flex-direction: column;
   height: 100%;
+}
+#workspace {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+/* Top bar of workload tabs. */
+#tabbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  background: #e9ebee;
+  border-bottom: 1px solid #dbdee2;
+}
+/* The tabs themselves lay out in a horizontal row and scroll sideways if they overflow. */
+#tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  max-width: 220px;
+  padding: 4px 4px 4px 12px;
+  background: #f4f5f7;
+  border: 1px solid #d7dbe0;
+  border-radius: 7px;
+  cursor: pointer;
+  color: #4a5058;
+}
+.tab:hover {
+  background: #eef0f3;
+}
+.tab.active {
+  background: #fff;
+  border-color: #aeb8c6;
+  color: #1c1f24;
+  box-shadow: 0 1px 2px rgba(20, 24, 30, 0.1);
+}
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab-close {
+  flex: none;
+  padding: 0 5px;
+  border: none;
+  background: transparent;
+  color: #a0a6af;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 4px;
+}
+.tab-close:hover {
+  background: #f0d4d1;
+  color: #b3261e;
+}
+#tab-add {
+  flex: none;
+  padding: 3px 11px;
+  font-size: 15px;
+  line-height: 1.2;
 }
 #doc {
   flex: 1;
@@ -336,7 +407,9 @@ button:disabled {
   border: 1px solid #cfd3d8;
   border-radius: 4px;
 }
-#workload-open {
+.workload-buttons {
+  display: flex;
+  gap: 6px;
   margin-top: 8px;
 }
 #dir-list,
