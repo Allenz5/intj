@@ -643,8 +643,12 @@ new ResizeObserver(() => {
 
 // A workload's agent command (default 'claude') and its sparse dirs (each in its own input; empty =
 // full checkout). Shown on the workload page, editable before opening, and saved with the workload.
-type WorkloadInfo = { id: string; title: string; agent: string; sparse: string[] }
+type WorkloadInfo = { id: string; title: string; agent: string; sparse: string[]; branch: string; base: string }
 const pickerAgentInput = $<HTMLInputElement>('picker-agent-cmd')
+// The foundation-worktree fields: a workload's branch and the head it derives from. Only shown (and only
+// applied) when creating a workload — an existing workload's worktree is already fixed.
+const pickerBranchInput = $<HTMLInputElement>('picker-branch')
+const pickerBaseInput = $<HTMLInputElement>('picker-base')
 
 function addSparseInput(value = '') {
   const row = document.createElement('div')
@@ -938,25 +942,31 @@ function highlightSelected() {
   }
 }
 
-function fillConfig(agent: string, sparse: string[]) {
+function fillConfig(agent: string, sparse: string[], branch = '', base = '') {
   pickerAgentInput.value = agent
   setSparseInputs(sparse)
+  pickerBranchInput.value = branch
+  pickerBaseInput.value = base
 }
 
-// Select an existing workload: show (and let the user edit) its own settings before opening.
+// Select an existing workload: show (and let the user edit) its own settings before opening. Its
+// worktree is already fixed, so hide the branch/base fields (shown read-only for reference is not needed).
 function selectWorkload(id: string) {
   selectedId = id
   const w = workloads.find((x) => x.id === id)
-  if (w) fillConfig(w.agent, w.sparse)
+  if (w) fillConfig(w.agent, w.sparse, w.branch, w.base)
+  $('picker-worktree').hidden = true
   highlightSelected()
   $('workload-open').textContent = 'Open workload'
 }
 
-// A new workload copies the most recent workload's settings (the list is newest-first).
+// A new workload copies the most recent workload's settings (the list is newest-first), except its
+// branch: a fresh name is required, so leave it blank while seeding the base from the recent workload.
 function selectNew() {
   selectedId = null
   const recent = workloads[0]
-  fillConfig(recent?.agent ?? 'claude', recent?.sparse ?? [])
+  fillConfig(recent?.agent ?? 'claude', recent?.sparse ?? [], '', recent?.base ?? '')
+  $('picker-worktree').hidden = false
   highlightSelected()
   $('workload-open').textContent = 'Create workload'
 }
@@ -968,6 +978,8 @@ $('workload-open').onclick = async () => {
     id: selectedId ?? undefined,
     agent: pickerAgentInput.value,
     sparse: getSparseInputs(),
+    branch: pickerBranchInput.value.trim(),
+    base: pickerBaseInput.value.trim(),
   })
   const data = await res.json()
   if (!res.ok) return alert(data.error)

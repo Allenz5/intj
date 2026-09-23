@@ -353,7 +353,8 @@ button:disabled {
   padding-top: 12px;
   border-top: 1px solid #e3e5e8;
 }
-#picker-agent {
+#picker-agent,
+.picker-field {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -362,8 +363,13 @@ button:disabled {
 #picker-sparse {
   margin: 8px 0;
 }
+.picker-field label {
+  flex: none;
+  width: 130px;
+}
 #picker-agent label,
-#picker-sparse label {
+#picker-sparse label,
+.picker-field label {
   color: #6b7380;
   font-size: 13px;
   white-space: nowrap;
@@ -398,6 +404,7 @@ button:disabled {
   color: #b3261e;
 }
 #picker-agent-cmd,
+.picker-field input,
 .sparse-input {
   flex: 1;
   min-width: 0;

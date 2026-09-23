@@ -24,6 +24,16 @@
               <label for="picker-agent-cmd">Agent command</label>
               <input id="picker-agent-cmd" placeholder="claude" autocomplete="off" spellcheck="false" />
             </div>
+            <div id="picker-worktree" hidden>
+              <div class="picker-field">
+                <label for="picker-branch">Branch name</label>
+                <input id="picker-branch" placeholder="e.g. my-feature" autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="picker-field">
+                <label for="picker-base">Derive from (head)</label>
+                <input id="picker-base" placeholder="e.g. master" autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
             <div id="picker-sparse">
               <div class="picker-sparse-head">
                 <label>Sparse directories</label>

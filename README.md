@@ -33,11 +33,20 @@ PORT=6000 npm run dev           # serve on a different port
 
 2. **Pick or create a workload** — a workload is a set of markdown docs kept under
    `.opendoc/<timestamp>-<uuid>/`, starting from `main.md`. Docs live outside git and are never
-   committed.
+   committed. When creating one you also set:
+   - **Branch name** — the branch the workload's foundation worktree is created on. It is meaningful
+     and yours to push; sessions' internal branches are never pushed.
+   - **Derive from (head)** — the base ref the foundation starts from. It is fetched from origin
+     first, so the workload begins from the latest remote state. Leave the branch empty to skip the
+     worktree and run on the main checkout, as before.
+
+   The workload's main agent runs in this foundation worktree, and every session branches from it.
 
 3. **Work from the doc** — select text (or right-click a block) and:
-   - **Start chat** — open an agent session on that selection in a fresh worktree.
-   - **Fork chat** — continue from another session's files and conversation.
+   - **Start chat** — open an agent session on that selection in a fresh worktree, branched from the
+     foundation's committed HEAD.
+   - **Fork chat** — continue from another session's files and conversation, branched from that
+     session's committed HEAD. (Derivation is from committed state, so commit to hand work down.)
    - **Split doc** — move a section's detail into a linked child doc.
 
 4. **Manage sessions** — each session shows as a card by its quote. **Open terminal** to watch

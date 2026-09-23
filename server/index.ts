@@ -27,6 +27,11 @@ const normDir = (d: string) => d.trim().replace(/\/+$/, '')
 // Multiple dirs, separated by whitespace, commas, or colons; trailing slashes trimmed.
 const parseCone = (s: string) => s.split(/[\s:,]+/).map(normDir).filter(Boolean)
 let sparseCone = parseCone(process.env.OPENDOC_SPARSE ?? '')
+// A workload's foundation worktree: a checkout on its own branch, derived from `base` (fetched first),
+// that the main agent runs in and sessions branch from. Set from the picker when a workload is created;
+// an empty branch means no worktree — the workload runs on the main checkout, as before.
+let workloadBranch = ''
+let workloadBase = ''
 const port = Number(process.env.PORT ?? 5173)
 
 // Git runs off the event loop: on a large repo a status/worktree call takes seconds, and a
@@ -40,7 +45,7 @@ const git = async (args: string[], cwd = projectDir, env = process.env) =>
 // Each workload keeps its own agent command and sparse dirs in its settings.json (untracked, like the
 // rest of .opendoc); a new workload copies the most recent one's (the picker seeds them). Applied to the
 // live agentCmd/sparseCone when the workload is opened, since sessions run against the open workload.
-type Settings = { agent: string; sparse: string[] }
+type Settings = { agent: string; sparse: string[]; branch: string; base: string }
 const settingsFile = (workloadDir: string) => path.join(workloadDir, 'settings.json')
 function loadSettings(workloadDir: string): Settings {
   try {
@@ -48,14 +53,19 @@ function loadSettings(workloadDir: string): Settings {
     return {
       agent: typeof s.agent === 'string' && s.agent.trim() ? s.agent : 'claude',
       sparse: Array.isArray(s.sparse) ? s.sparse.map(String).map(normDir).filter(Boolean) : [],
+      branch: typeof s.branch === 'string' ? s.branch.trim() : '',
+      base: typeof s.base === 'string' ? s.base.trim() : '',
     }
   } catch {
-    return { agent: 'claude', sparse: [] }
+    return { agent: 'claude', sparse: [], branch: '', base: '' }
   }
 }
 function saveSettings() {
   if (!workloadDir) return
-  fs.writeFileSync(settingsFile(workloadDir), JSON.stringify({ agent: agentCmd, sparse: sparseCone }, null, 2))
+  fs.writeFileSync(
+    settingsFile(workloadDir),
+    JSON.stringify({ agent: agentCmd, sparse: sparseCone, branch: workloadBranch, base: workloadBase }, null, 2),
+  )
 }
 
 // Check each sparse dir names a real directory in the repo at HEAD, so a session's worktree isn't
@@ -85,6 +95,49 @@ async function invalidSparseDirs(dirs: string[]): Promise<string[]> {
 
 const WORKLOAD = /^\d{8}-\d{4}-[0-9a-f-]{36}$/
 
+// A workload's foundation worktree lives at `.opendoc/<id>/root`. When it exists it stands in for the
+// main checkout: the main agent runs in it and sessions branch from it, so the real checkout is never
+// touched. Workloads created without a branch (or before this) have none and fall back to the main
+// checkout.
+const rootDir = (dir = workloadDir) => path.join(dir, 'root')
+const hasRoot = (dir = workloadDir) => !!dir && fs.existsSync(rootDir(dir))
+// The active workload's foundation, and the same resolved from a session's own worktree path
+// (`<workloadDir>/worktrees/<id>`) so per-session git ops stay correct even if the active tab changed.
+const workloadRoot = () => (hasRoot() ? rootDir() : projectDir)
+const sessionWl = (s: Pick<Session, 'worktree'>) => path.dirname(path.dirname(s.worktree))
+const sessionRoot = (s: Pick<Session, 'worktree'>) => (hasRoot(sessionWl(s)) ? rootDir(sessionWl(s)) : projectDir)
+
+// Build the open workload's foundation worktree on `branch`, derived from `base`. The base is always
+// fetched from origin first so the worktree starts from the latest remote state, falling back to a local
+// ref when there's no remote (or the fetch fails). An existing branch is reused as-is (base ignored). No
+// branch means the workload stays on the main checkout.
+async function createWorktree(branch: string, base: string) {
+  if (!workloadDir || !branch || hasRoot()) return
+  const dir = rootDir()
+  const exists = await git(['rev-parse', '--verify', `refs/heads/${branch}`]).then(() => true, () => false)
+  let startRef = branch
+  if (!exists) {
+    const head = base || (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
+    const fetched = await git(['fetch', 'origin', head]).then(() => true, () => false)
+    if (fetched) {
+      startRef = `origin/${head}`
+    } else {
+      const ok = await git(['rev-parse', '--verify', '--quiet', `${head}^{commit}`]).then(() => true, () => false)
+      if (!ok) throw new Error(`Base "${head}" not found locally and could not be fetched from origin`)
+      startRef = head
+    }
+  }
+  const born = exists ? [dir, branch] : ['-b', branch, dir, startRef]
+  if (sparseCone.length) {
+    await git(['worktree', 'add', '--no-checkout', ...born])
+    await git(['sparse-checkout', 'init', '--cone', '--sparse-index'], dir)
+    await git(['sparse-checkout', 'set', ...sparseCone], dir)
+    await git(['checkout'], dir)
+  } else {
+    await git(['worktree', 'add', ...born])
+  }
+}
+
 async function openProject(dir: string) {
   projectDir = fs.realpathSync(dir)
   try {
@@ -109,8 +162,8 @@ function listWorkloads() {
   const ids = fs.existsSync(root) ? fs.readdirSync(root).filter((n) => WORKLOAD.test(n)).sort().reverse() : []
   return ids.map((id) => {
     const dir = path.join(root, id)
-    const { agent, sparse } = loadSettings(dir)
-    return { id, title: readDoc(path.join(dir, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '', agent, sparse }
+    const { agent, sparse, branch, base } = loadSettings(dir)
+    return { id, title: readDoc(path.join(dir, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '', agent, sparse, branch, base }
   })
 }
 
@@ -126,7 +179,8 @@ async function openWorkload(id?: string) {
   }
   if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
   const dir = path.join(projectDir, '.opendoc', id)
-  if (!fs.existsSync(dir)) {
+  const created = !fs.existsSync(dir)
+  if (created) {
     // Docs are not tracked; a session's worktree gets them copied in, so no commit is needed.
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'main.md'), `# ${path.basename(projectDir)}\n`)
@@ -134,6 +188,7 @@ async function openWorkload(id?: string) {
   workloadDir = dir
   workloadRel = path.relative((await git(['rev-parse', '--show-toplevel'])).trim(), dir)
   watchDocs()
+  return created
 }
 
 // Delete a workload: end its sessions (dropping their worktrees/branches), then remove its folder.
@@ -311,7 +366,7 @@ function sendWhenReady(t: AgentTerm, text: string) {
   })
 }
 
-// The always-on main agent: a plain agent session on the main checkout, and the doc's persistent
+// The always-on main agent: a plain agent session in the workload's foundation worktree, and the doc's persistent
 // comment block. Each workload keeps its own, so switching tabs leaves the others' agents running; a
 // closed tab's agent is killed but its conversation id is saved, so reopening resumes it. Keyed by
 // workload id; the active workload's is the one the client's `main` terminal talks to.
@@ -346,7 +401,7 @@ function getMainTerm(): Main {
   saveMainChat(workloadDir, chat)
   if (saved) {
     // The conversation already has the docs' context; just resume it.
-    startTerm(m, projectDir, resumeCmd(chat))
+    startTerm(m, workloadRoot(), resumeCmd(chat))
     m.busy = false
   } else {
     // Prime the main agent with the open workload's docs so it starts with the same context, without
@@ -359,7 +414,7 @@ function getMainTerm(): Main {
         `As we work, when changes should be reflected in the docs, use the opendoc:update-docs skill to update the docs in ${workloadDir}.`
       : ''
     const arg = prompt ? ' "$OPENDOC_PROMPT"' : ''
-    startTerm(m, projectDir, `${agentCmd} --session-id ${chat}${arg}`, prompt ? { OPENDOC_PROMPT: prompt } : {})
+    startTerm(m, workloadRoot(), `${agentCmd} --session-id ${chat}${arg}`, prompt ? { OPENDOC_PROMPT: prompt } : {})
   }
   return m
 }
@@ -508,7 +563,7 @@ async function mergeDocs(s: Session) {
 type Anchor = Pick<Session, 'quote' | 'prefix' | 'suffix' | 'pos'>
 const sessions = new Map<string, Session>()
 
-// Whether the worktree has anything main doesn't (uncommitted edits or unmerged commits), cached so
+// Whether the worktree has anything the workload's foundation doesn't (uncommitted edits or unmerged commits), cached so
 // broadcasts stay synchronous. Recomputed off the event loop, debounced, since git status on a large
 // repo is slow; the card updates when the value actually changes.
 const unmergedCache = new Map<string, boolean>()
@@ -522,7 +577,7 @@ function refreshUnmerged(s: Session) {
       unmergedTimers.delete(s.id)
       try {
         const dirty = (await git(['status', '--porcelain'], s.worktree)).trim() !== ''
-        const ahead = (await git(['rev-list', '--count', `HEAD..${s.branch}`])).trim() !== '0'
+        const ahead = (await git(['rev-list', '--count', `HEAD..${s.branch}`], sessionRoot(s))).trim() !== '0'
         // Docs live outside git, so check them separately, or a doc-only session would never merge.
         const val = dirty || ahead || docsDiffer(s)
         if (sessions.has(s.id) && unmergedCache.get(s.id) !== val) {
@@ -605,21 +660,6 @@ function restoreSessions() {
   broadcastSessions()
 }
 
-// A commit of the worktree as it is now, uncommitted and untracked files included, leaving its index alone.
-async function snapshot(s: Pick<Session, 'id' | 'worktree'>) {
-  const index = path.join(os.tmpdir(), `opendoc-index-${crypto.randomUUID()}`)
-  const env = { ...process.env, GIT_INDEX_FILE: index }
-  try {
-    await git(['add', '-A'], s.worktree, env)
-    const tree = (await git(['write-tree'], s.worktree, env)).trim()
-    const head = (await git(['rev-parse', 'HEAD'], s.worktree)).trim()
-    if (tree === (await git(['rev-parse', 'HEAD^{tree}'], s.worktree)).trim()) return head
-    return (await git(['commit-tree', tree, '-p', head, '-m', `opendoc ${s.id}: snapshot for fork`], s.worktree)).trim()
-  } finally {
-    fs.rmSync(index, { force: true })
-  }
-}
-
 // Claude Code keeps each conversation at <config>/projects/<cwd, non-alphanumerics as '-'>/<id>.jsonl
 // and --resume only looks in the current cwd's folder. A fork runs in a new worktree, so copy the
 // source conversation into that worktree's folder first (it's written as the chat goes, so a running
@@ -655,7 +695,11 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
 
   ;(async () => {
     try {
-      const startPoint = from ? await snapshot(from) : 'HEAD'
+      // Branch from the committed HEAD of the source worktree — the workload's foundation for a new
+      // session, or the source session's worktree for a fork. Uncommitted work does not carry over, so
+      // the agent must commit for its work to flow down to sessions derived from it.
+      const srcWorktree = from ? from.worktree : workloadRoot()
+      const startPoint = (await git(['rev-parse', 'HEAD'], srcWorktree)).trim()
       // Materializing a huge repo's whole tree is the bottleneck. When OPENDOC_SPARSE names directories,
       // do a cone checkout of just those (with a sparse index) so creation and later git ops touch far
       // fewer files; otherwise check out the full tree.
@@ -722,8 +766,8 @@ const midMerge = async (dir: string) => {
   }
 }
 
-// Conflicts are resolved in the session's worktree, never on the current branch: docs get markers in
-// the session's copy, and when the code won't merge cleanly the current branch is merged into the
+// Conflicts are resolved in the session's worktree, never on the foundation branch: docs get markers in
+// the session's copy, and when the code won't merge cleanly the foundation branch is merged into the
 // session's branch instead. The session's agent resolves both; the next Merge is then clean.
 async function mergeSession(s: Session) {
   if (s.status === 'creating' || (s.status === 'running' && s.busy)) throw new Error('The session is still working; Merge once it is done')
@@ -735,15 +779,17 @@ async function mergeSession(s: Session) {
   if ((await git(['status', '--porcelain'], s.worktree)).trim()) {
     await git(['commit', '-m', `opendoc ${s.id}: ${s.prompt.split('\n')[0]}`], s.worktree)
   }
+  // Merge the session into the workload's foundation worktree (its branch), never the main checkout.
+  const root = sessionRoot(s)
   let codeConflict = false
   try {
-    await git(['merge', '--no-edit', s.branch])
+    await git(['merge', '--no-edit', s.branch], root)
   } catch (e) {
     try {
-      await git(['merge', '--abort'])
+      await git(['merge', '--abort'], root)
     } catch {}
-    const current = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
-    const target = current === 'HEAD' ? (await git(['rev-parse', 'HEAD'])).trim() : current
+    const current = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], root)).trim()
+    const target = current === 'HEAD' ? (await git(['rev-parse', 'HEAD'], root)).trim() : current
     try {
       await git(['merge', '--no-edit', target], s.worktree)
     } catch (e2) {
@@ -751,9 +797,9 @@ async function mergeSession(s: Session) {
       if (!(await midMerge(s.worktree))) throw e2
       codeConflict = true
     }
-    // The session now contains the current branch, so this merge is a fast-forward; if it still fails,
+    // The session now contains the foundation branch, so this merge is a fast-forward; if it still fails,
     // the cause wasn't a conflict (a dirty checkout, say), so report it.
-    if (!codeConflict) await git(['merge', '--no-edit', s.branch])
+    if (!codeConflict) await git(['merge', '--no-edit', s.branch], root)
   }
   if (docConflicts.length || codeConflict) handOffConflicts(s, docConflicts, codeConflict)
   return { docConflicts, codeConflict }
@@ -836,7 +882,7 @@ server.on('request', async (req, res) => {
       return sendJson(res, 200, { project: projectDir, workloads })
     }
     if (req.method === 'POST' && url === '/api/workload') {
-      const { id, agent, sparse } = await readBody(req)
+      const { id, agent, sparse, branch, base } = await readBody(req)
       // No project open (e.g. the server was restarted while the browser kept the picker open): bail
       // clearly instead of running git — and thus the sparse-dir check — against the wrong directory.
       if (!projectDir) return sendJson(res, 409, { error: 'no project open' })
@@ -850,13 +896,27 @@ server.on('request', async (req, res) => {
         if (bad.length)
           return sendJson(res, 400, { error: `Sparse ${bad.length > 1 ? 'directories' : 'directory'} not found in the repo: ${bad.join(', ')}` })
       }
-      await openWorkload(id)
+      const created = await openWorkload(id)
       // Apply the picker's values to this workload and persist them; fall back to its saved settings
-      // when the picker sent none (e.g. reopening straight from a link).
+      // when the picker sent none (e.g. reopening straight from a link). Branch/base only define a new
+      // workload's foundation worktree, so they come from its saved settings for an existing one.
       const saved = loadSettings(workloadDir)
       agentCmd = typeof agent === 'string' ? agent.trim() || 'claude' : saved.agent
       sparseCone = cone ?? saved.sparse
+      workloadBranch = created && typeof branch === 'string' ? branch.trim() : saved.branch
+      workloadBase = created && typeof base === 'string' ? base.trim() : saved.base
       saveSettings()
+      // A new workload with a branch gets its own foundation worktree, derived from the fetched base.
+      // If it can't be built, surface the error and stop — the user asked for a specific base to work
+      // from, so silently falling back to the main checkout would be misleading.
+      if (created && workloadBranch) {
+        try {
+          await createWorktree(workloadBranch, workloadBase)
+        } catch (e) {
+          await deleteWorkload(activeWid())
+          return sendJson(res, 400, { error: `Could not create worktree: ${errorText(e)}` })
+        }
+      }
       // Bring back any sessions this workload had open (agentCmd is now set, so they resume correctly).
       restoreSessions()
       // Always refresh the client with this workload's cards (restoreSessions is silent when a workload
@@ -919,7 +979,7 @@ server.on('request', async (req, res) => {
         // Fork from the active workload's main agent: its checkout and conversation are the source.
         const chat = mains.get(activeWid())?.chat
         if (!chat) return sendJson(res, 400, { error: 'Open the main agent and send it a message before forking from it' })
-        src = { id: 'main', worktree: projectDir, chat }
+        src = { id: 'main', worktree: workloadRoot(), chat }
       } else if (from) {
         src = sessions.get(from)
         if (!src) return sendJson(res, 404, { error: `no session ${from}` })
