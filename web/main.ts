@@ -1,6 +1,7 @@
 import { marked } from 'marked'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 
 // Where a comment sits: its quote plus the text around it (whitespace removed) and its relative position.
@@ -582,10 +583,23 @@ function openTerminal(s: Pick<Session, 'id' | 'branch'>) {
       fontSize: 13,
       theme: { background: '#16181d' },
       macOptionClickForcesSelection: true,
+      // Animate wheel scrolling and move more lines per notch so it feels smooth, not stuttery.
+      smoothScrollDuration: 120,
+      scrollSensitivity: 3,
+      fastScrollSensitivity: 5,
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
+    // GPU renderer: eliminates the DOM renderer's scroll jank. If the WebGL context is
+    // unavailable or lost, dispose it so xterm falls back to the DOM renderer.
+    try {
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => webgl.dispose())
+      term.loadAddon(webgl)
+    } catch {
+      // WebGL unsupported here — stay on the DOM renderer.
+    }
     const ws = new WebSocket(wsUrl(`/pty/${s.id}`))
     const send = (data: string) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data }))
