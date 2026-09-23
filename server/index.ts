@@ -14,17 +14,19 @@ import pty, { type IPty } from 'node-pty'
 const startDir = path.resolve(process.argv[2] ?? process.cwd())
 // Both are chosen in the picker: the project folder, then a workload in it.
 let projectDir = ''
-// <project>/.intj/<date-time>-<uuid>: the workload's md docs, plus its sessions' worktrees.
+// <project>/.opendoc/<date-time>-<uuid>: the workload's md docs, plus its sessions' worktrees.
 let workloadDir = ''
 // The workload's path from the repo root, which is also where its docs sit in each worktree.
 let workloadRel = ''
 // The agent is just a command run in a terminal, so any CLI agent can be swapped in.
 // Mutable so the picker can set it before the main terminal starts.
-let agentCmd = process.env.INTJ_AGENT ?? 'claude'
+let agentCmd = process.env.OPENDOC_AGENT ?? 'claude'
 // Directories a session's worktree is cone-checked-out to; empty means a full checkout. Set from the
-// picker (or INTJ_SPARSE) to speed up worktree creation on a huge repo.
-const parseCone = (s: string) => s.split(/[\s:,]+/).filter(Boolean)
-let sparseCone = parseCone(process.env.INTJ_SPARSE ?? '')
+// picker (or OPENDOC_SPARSE) to speed up worktree creation on a huge repo.
+const normDir = (d: string) => d.trim().replace(/\/+$/, '')
+// Multiple dirs, separated by whitespace, commas, or colons; trailing slashes trimmed.
+const parseCone = (s: string) => s.split(/[\s:,]+/).map(normDir).filter(Boolean)
+let sparseCone = parseCone(process.env.OPENDOC_SPARSE ?? '')
 const port = Number(process.env.PORT ?? 5173)
 
 // Git runs off the event loop: on a large repo a status/worktree call takes seconds, and a
@@ -32,6 +34,52 @@ const port = Number(process.env.PORT ?? 5173)
 const execFileP = promisify(execFile)
 const git = async (args: string[], cwd = projectDir, env = process.env) =>
   (await execFileP('git', args, { cwd, encoding: 'utf8', env, maxBuffer: 256 * 1024 * 1024 })).stdout
+
+// ---- Per-workload settings ----
+
+// Each workload keeps its own agent command and sparse dirs in its settings.json (untracked, like the
+// rest of .opendoc); a new workload copies the most recent one's (the picker seeds them). Applied to the
+// live agentCmd/sparseCone when the workload is opened, since sessions run against the open workload.
+type Settings = { agent: string; sparse: string[] }
+const settingsFile = (workloadDir: string) => path.join(workloadDir, 'settings.json')
+function loadSettings(workloadDir: string): Settings {
+  try {
+    const s = JSON.parse(fs.readFileSync(settingsFile(workloadDir), 'utf8'))
+    return {
+      agent: typeof s.agent === 'string' && s.agent.trim() ? s.agent : 'claude',
+      sparse: Array.isArray(s.sparse) ? s.sparse.map(String).map(normDir).filter(Boolean) : [],
+    }
+  } catch {
+    return { agent: 'claude', sparse: [] }
+  }
+}
+function saveSettings() {
+  if (!workloadDir) return
+  fs.writeFileSync(settingsFile(workloadDir), JSON.stringify({ agent: agentCmd, sparse: sparseCone }, null, 2))
+}
+
+// Check each sparse dir names a real directory in the repo at HEAD, so a session's worktree isn't
+// cone-checked out to nothing. Returns the dirs that don't exist (empty if all are fine, or the repo
+// has no commits yet — then there's nothing to check against). Paths are repo-root-relative, matching
+// how `git sparse-checkout set` reads them.
+async function invalidSparseDirs(dirs: string[]): Promise<string[]> {
+  if (!dirs.length) return []
+  try {
+    await git(['rev-parse', '--verify', 'HEAD'])
+  } catch {
+    return []
+  }
+  const bad: string[] = []
+  for (const d of dirs) {
+    try {
+      // HEAD:<path> is always repo-root-relative; a directory is a tree, a file a blob.
+      if ((await git(['cat-file', '-t', `HEAD:${d}`])).trim() !== 'tree') bad.push(d)
+    } catch {
+      bad.push(d)
+    }
+  }
+  return bad
+}
 
 // ---- Project and workload ----
 
@@ -44,25 +92,32 @@ async function openProject(dir: string) {
   } catch {
     await git(['init'])
   }
-  // The whole .intj tree stays out of git: docs are never committed or pushed, and each session's
+  // The whole .opendoc tree stays out of git: docs are never committed or pushed, and each session's
   // worktree gets them copied in. Doc changes are 3-way merged back with git merge-file, not git merge.
   const excludeFile = path.resolve(projectDir, (await git(['rev-parse', '--git-dir'])).trim(), 'info', 'exclude')
   let text = readDoc(excludeFile)
-  if (!/^\.intj\/?$/m.test(text)) text += '\n.intj/\n'
+  if (!/^\.opendoc\/?$/m.test(text)) text += '\n.opendoc/\n'
   fs.mkdirSync(path.dirname(excludeFile), { recursive: true })
   fs.writeFileSync(excludeFile, text)
   return listWorkloads()
 }
 
-// Newest first, each titled by its root doc's first heading.
+// Newest first, each titled by its root doc's first heading, with its saved settings so the picker can
+// show them and seed a new workload from the most recent.
 function listWorkloads() {
-  const root = path.join(projectDir, '.intj')
+  const root = path.join(projectDir, '.opendoc')
   const ids = fs.existsSync(root) ? fs.readdirSync(root).filter((n) => WORKLOAD.test(n)).sort().reverse() : []
-  return ids.map((id) => ({ id, title: readDoc(path.join(root, id, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '' }))
+  return ids.map((id) => {
+    const dir = path.join(root, id)
+    const { agent, sparse } = loadSettings(dir)
+    return { id, title: readDoc(path.join(dir, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '', agent, sparse }
+  })
 }
 
-// Open a workload, or create one when no id is given.
+// Open a workload, or create one when no id is given. Switching tabs leaves the previous workload's
+// agents alive (see mains/sessions); only its session metadata is persisted here before we switch.
 async function openWorkload(id?: string) {
+  if (workloadDir) saveSessions()
   if (!id) {
     const d = new Date()
     const p = (n: number) => String(n).padStart(2, '0')
@@ -70,7 +125,7 @@ async function openWorkload(id?: string) {
     id = `${stamp}-${crypto.randomUUID()}`
   }
   if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
-  const dir = path.join(projectDir, '.intj', id)
+  const dir = path.join(projectDir, '.opendoc', id)
   if (!fs.existsSync(dir)) {
     // Docs are not tracked; a session's worktree gets them copied in, so no commit is needed.
     fs.mkdirSync(dir, { recursive: true })
@@ -84,7 +139,12 @@ async function openWorkload(id?: string) {
 // Delete a workload: end its sessions (dropping their worktrees/branches), then remove its folder.
 async function deleteWorkload(id: string) {
   if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
-  const dir = path.join(projectDir, '.intj', id)
+  const dir = path.join(projectDir, '.opendoc', id)
+  const m = mains.get(id)
+  if (m) {
+    m.term?.kill()
+    mains.delete(id)
+  }
   for (const s of [...sessions.values()]) {
     if (s.worktree.startsWith(dir + path.sep)) await endSession(s)
   }
@@ -99,6 +159,35 @@ async function deleteWorkload(id: string) {
   return listWorkloads()
 }
 
+// Close a workload's tab: stop its main agent and session agents, but leave everything on disk — its
+// docs, worktrees, saved sessions, and the main agent's conversation id all persist, so reopening the
+// tab restores the cards and resumes every agent. (Contrast deleteWorkload, which removes the folder.)
+function closeWorkload(id: string) {
+  if (!WORKLOAD.test(id)) throw new Error(`invalid workload: ${id}`)
+  const dir = path.join(projectDir, '.opendoc', id)
+  // Clear the active pointer first, so a terminal's exit doesn't persist an emptied session list.
+  if (workloadDir === dir) {
+    closeDocWatcher()
+    workloadDir = ''
+    workloadRel = ''
+  }
+  const m = mains.get(id)
+  if (m) {
+    m.term?.kill()
+    for (const ws of m.clients) ws.close()
+    mains.delete(id)
+  }
+  for (const s of [...sessions.values()]) {
+    if (s.worktree.startsWith(dir + path.sep)) {
+      s.term?.kill()
+      for (const ws of s.clients) ws.close()
+      sessions.delete(s.id)
+      unmergedCache.delete(s.id)
+    }
+  }
+  broadcast({ type: 'sessions', list: activeSessions().map(publicSession) })
+}
+
 // ---- Agent terminals ----
 
 type AgentTerm = {
@@ -109,21 +198,25 @@ type AgentTerm = {
   term: IPty | null
   buffer: string
   clients: Set<WebSocket>
+  // Flips busy→idle once the agent's output has gone quiet (see noteActivity).
+  idleTimer?: ReturnType<typeof setTimeout>
 }
 const MAX_BUFFER = 500_000
-// Claude Code hooks report the agent's state to /api/activity: a submitted prompt starts a turn, and
-// Stop (or StopFailure on an API error) ends it. An interrupted turn fires neither, so the idle_prompt
-// notification, sent once the agent has sat waiting for input a while, also marks it idle. The hook
-// settings are passed in through $INTJ_HOOKS, which startTerm sets per terminal.
-const agentWithHooks = () => `${agentCmd} --settings "$INTJ_HOOKS"`
-const hooksFor = (id: string) => {
-  const post = (busy: number) => [
-    { hooks: [{ type: 'command', command: `curl -s -m 2 -X POST 'http://127.0.0.1:${port}/api/activity/${id}?busy=${busy}' >/dev/null` }] },
-  ]
-  const idle = post(0)
-  return JSON.stringify({
-    hooks: { UserPromptSubmit: post(1), Stop: idle, StopFailure: idle, Notification: [{ ...idle[0], matcher: 'idle_prompt' }] },
-  })
+// Agents differ in how they resume/fork a conversation. isaac keeps its conversations in its own
+// (local or cloud) session store rather than Claude Code's <id>.jsonl, so forking uses
+// `isaac resume <id> --fork` instead of copying the transcript and passing --resume --fork-session.
+const agentIsIsaac = () => /(^|\/)isaac$/.test(agentCmd.trim().split(/\s+/)[0] ?? '')
+// Resuming a saved conversation: isaac uses a `resume <id>` subcommand, Claude Code a `--resume <id>` flag.
+const resumeCmd = (chat: string) => (agentIsIsaac() ? `${agentCmd} resume ${chat}` : `${agentCmd} --resume ${chat}`)
+
+// Agent status is inferred generically from terminal output, not agent-specific hooks: while an agent
+// works it streams output, and while it waits for input the output goes quiet. So any output marks the
+// terminal busy, and after this much silence it's marked idle again — this works for any CLI agent.
+const IDLE_MS = 1200
+function noteActivity(t: AgentTerm, id: string) {
+  setBusy(id, true)
+  clearTimeout(t.idleTimer)
+  t.idleTimer = setTimeout(() => setBusy(id, false), IDLE_MS)
 }
 
 const newTerm = (): AgentTerm => ({ status: 'creating', busy: true, term: null, buffer: '', clients: new Set() })
@@ -133,14 +226,27 @@ const newTerm = (): AgentTerm => ({ status: 'creating', busy: true, term: null, 
 function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<string, string> = {}) {
   // Sessions extend this object, so an id means this terminal is a session's.
   const id = (t as Partial<Session>).id ?? 'main'
-  // Drop CLAUDECODE so an agent still starts when intj itself was launched from inside Claude Code.
-  const { CLAUDECODE, ...baseEnv } = process.env
+  // Drop the markers that say "you're a nested child of this Claude Code session". Otherwise, when the
+  // opendoc server was itself launched from inside Claude Code/isaac, every agent inherits them, runs as
+  // a child with transcript saving OFF, and its conversation is never saved — so it can't be resumed,
+  // forked, or restored. Stripping them makes each agent an independent, saveable session. (Auth,
+  // telemetry, and feature CLAUDE_CODE_* vars are left intact.)
+  const {
+    CLAUDECODE,
+    CLAUDE_CODE_CHILD_SESSION,
+    CLAUDE_CODE_SESSION_ID,
+    CLAUDE_CODE_SESSION_ATTENDED,
+    CLAUDE_CODE_ENTRYPOINT,
+    CLAUDE_CODE_MESSAGING_SOCKET,
+    CLAUDE_CODE_MESSAGING_TOKEN,
+    ...baseEnv
+  } = process.env
   const term = pty.spawn(process.env.SHELL ?? '/bin/zsh', ['-lc', command], {
     name: 'xterm-256color',
     cwd,
     cols: 100,
     rows: 30,
-    env: { ...baseEnv, COLORTERM: 'truecolor', INTJ_HOOKS: hooksFor(id), ...env },
+    env: { ...baseEnv, COLORTERM: 'truecolor', ...env },
   })
   t.term = term
   t.status = 'running'
@@ -149,37 +255,113 @@ function startTerm(t: AgentTerm, cwd: string, command: string, env: Record<strin
     // Keep recent output so a terminal opened later (or after a page reload) shows history.
     t.buffer = (t.buffer + data).slice(-MAX_BUFFER)
     for (const ws of t.clients) ws.send(data)
+    // Output means the agent is working; quiet means it's idle (see noteActivity).
+    noteActivity(t, id)
   })
   term.onExit(() => {
     t.status = 'exited'
     for (const ws of t.clients) ws.send('\r\n[process exited]\r\n')
-    broadcastSessions()
+    // A main term reports its own state; a session's exit changes the session list.
+    if (id.startsWith('main:')) {
+      if (id.slice(5) === activeWid()) broadcast({ type: 'main', busy: false, status: 'exited' })
+    } else broadcastSessions()
   })
   return t
 }
 
 function setBusy(id: string, busy: boolean) {
-  const t = id === 'main' ? mainTerm : sessions.get(id)
-  // An ended session is gone, so its late hooks are dropped.
+  // A main term's id is `main:<workload>`, so its state only reaches the client while that workload is
+  // the active tab (each workload keeps its own always-on main agent, but only one is shown at a time).
+  if (id.startsWith('main:')) {
+    const wid = id.slice(5)
+    const m = mains.get(wid)
+    if (!m || m.busy === busy) return
+    m.busy = busy
+    if (wid === activeWid()) {
+      broadcast({ type: 'main', busy, status: m.status })
+      // The main terminal may have just merged a handed-off session.
+      if (!busy) broadcastSessions()
+    }
+    return
+  }
+  const t = sessions.get(id)
+  // An ended session is gone, so its late output is ignored.
   if (!t || t.busy === busy) return
   t.busy = busy
-  if (id !== 'main') {
-    broadcast({ type: 'activity', id, busy, unmerged: unmergedCache.get(id) ?? false })
-    // Recompute the merge state off the event loop rather than blocking on git here.
-    refreshUnmerged(t as Session)
-  }
-  // The main terminal may have just merged a handed-off session.
-  else if (!busy) broadcastSessions()
+  broadcast({ type: 'activity', id, busy, unmerged: unmergedCache.get(id) ?? false })
+  // Recompute the merge state off the event loop rather than blocking on git here.
+  refreshUnmerged(t as Session)
 }
 
 const spawnAgent = (cwd: string, command: string, env: Record<string, string> = {}) =>
   startTerm(newTerm(), cwd, command, env)
 
-// The default terminal: a plain agent session on the main checkout, restarted if it has exited.
-let mainTerm: AgentTerm | null = null
-const getMainTerm = () => {
-  if (mainTerm?.status !== 'running') mainTerm = spawnAgent(projectDir, agentWithHooks())
-  return mainTerm
+// Type `text` into a just-started terminal once its agent looks ready (output has arrived, then gone
+// quiet). For agents that can't take the prompt as a launch argument, e.g. isaac's `resume --fork`.
+function sendWhenReady(t: AgentTerm, text: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const sub = t.term?.onData(() => {
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      sub?.dispose()
+      t.term?.write(text)
+      // Send Enter separately so the TUI doesn't treat it as part of a paste.
+      setTimeout(() => t.term?.write('\r'), 300)
+    }, 1500)
+  })
+}
+
+// The always-on main agent: a plain agent session on the main checkout, and the doc's persistent
+// comment block. Each workload keeps its own, so switching tabs leaves the others' agents running; a
+// closed tab's agent is killed but its conversation id is saved, so reopening resumes it. Keyed by
+// workload id; the active workload's is the one the client's `main` terminal talks to.
+type Main = AgentTerm & { chat: string }
+const mains = new Map<string, Main>()
+const activeWid = () => (workloadDir ? path.basename(workloadDir) : '')
+// The conversation id persists next to the workload's docs (untracked), so a reopened workload resumes
+// the same main-agent conversation rather than starting a fresh one.
+const mainChatFile = (dir: string) => path.join(dir, 'main-chat')
+const loadMainChat = (dir: string) => {
+  try {
+    return fs.readFileSync(mainChatFile(dir), 'utf8').trim()
+  } catch {
+    return ''
+  }
+}
+const saveMainChat = (dir: string, chat: string) => {
+  try {
+    fs.writeFileSync(mainChatFile(dir), chat)
+  } catch {}
+}
+
+function getMainTerm(): Main {
+  const wid = activeWid()
+  let m = mains.get(wid)
+  if (m && m.status === 'running') return m
+  // Resume a saved conversation if this workload has one; otherwise start a fresh one and prime it.
+  const saved = m?.chat || loadMainChat(workloadDir)
+  const chat = saved || crypto.randomUUID()
+  m = Object.assign(m ?? newTerm(), { chat, id: `main:${wid}` }) as Main
+  mains.set(wid, m)
+  saveMainChat(workloadDir, chat)
+  if (saved) {
+    // The conversation already has the docs' context; just resume it.
+    startTerm(m, projectDir, resumeCmd(chat))
+    m.busy = false
+  } else {
+    // Prime the main agent with the open workload's docs so it starts with the same context, without
+    // producing a reply, and tell it to keep those docs current. Passed through the environment to
+    // avoid shell-quoting issues.
+    const md = workloadDir && path.join(workloadDir, 'main.md')
+    const prompt = md
+      ? `This project's working docs live in the .opendoc workload directory ${workloadDir}; its root doc is ${md}. ` +
+        `Read ${md} and the docs it links to for context — just read them for now, don't reply. ` +
+        `As we work, when changes should be reflected in the docs, use the opendoc:update-docs skill to update the docs in ${workloadDir}.`
+      : ''
+    const arg = prompt ? ' "$OPENDOC_PROMPT"' : ''
+    startTerm(m, projectDir, `${agentCmd} --session-id ${chat}${arg}`, prompt ? { OPENDOC_PROMPT: prompt } : {})
+  }
+  return m
 }
 
 // ---- Sessions: one agent terminal per worktree ----
@@ -229,7 +411,7 @@ function docsDiffer(s: Session) {
 // A 3-way merge of plain files via git merge-file (no repo needed); on conflict the returned text
 // carries conflict markers.
 async function mergeFile3(ours: string, base: string, theirs: string) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'intj-merge-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opendoc-merge-'))
   const o = path.join(tmp, 'ours')
   const b = path.join(tmp, 'base')
   const t = path.join(tmp, 'theirs')
@@ -292,6 +474,8 @@ function syncAllDocs() {
         await syncDocs(s)
       } catch {}
     }
+    // docBase advanced for the synced sessions; keep the persisted merge bases current.
+    saveSessions()
   }, 300)
 }
 
@@ -354,18 +538,83 @@ const publicSession = (s: Session) => {
   const { id, doc, quote, prefix, suffix, pos, prompt, branch, status, busy } = s
   return { id, doc, quote, prefix, suffix, pos, prompt, branch, status, busy, unmerged: unmergedCache.get(id) ?? false }
 }
-const broadcastSessions = () => broadcast({ type: 'sessions', list: [...sessions.values()].map(publicSession) })
+// Only the active workload's sessions are shown/broadcast; the others' agents stay alive in the map
+// but belong to background tabs.
+const activeSessions = () => [...sessions.values()].filter((s) => !!workloadDir && s.worktree.startsWith(workloadDir + path.sep))
+const broadcastSessions = () => {
+  saveSessions()
+  broadcast({ type: 'sessions', list: activeSessions().map(publicSession) })
+}
+
+// ---- Restoring sessions ----
+
+// A workload remembers its live sessions, so reopening it brings their cards and agents back. The
+// worktree, branch, and the agent's conversation all persist on disk already; this only records the
+// light metadata (ids, anchors, merge bases) needed to rebuild each Session. Saved (untracked) next to
+// the workload's docs, only for sessions of the currently open workload.
+const sessionsFile = () => path.join(workloadDir, 'sessions.json')
+function saveSessions() {
+  if (!workloadDir) return
+  const mine = [...sessions.values()].filter((s) => s.worktree.startsWith(workloadDir + path.sep))
+  try {
+    const data = mine.map(({ id, doc, quote, prefix, suffix, pos, prompt, branch, worktree, chat, docBase }) => ({
+      id, doc, quote, prefix, suffix, pos, prompt, branch, worktree, chat, docBase,
+    }))
+    fs.writeFileSync(sessionsFile(), JSON.stringify(data, null, 2))
+  } catch {}
+}
+
+// Rebuild the open workload's saved sessions, resuming each agent's conversation in its worktree.
+function restoreSessions() {
+  let saved: any[]
+  try {
+    saved = JSON.parse(fs.readFileSync(sessionsFile(), 'utf8'))
+  } catch {
+    return
+  }
+  if (!Array.isArray(saved)) return
+  for (const r of saved) {
+    if (!r?.id || sessions.has(r.id)) continue
+    const worktree = path.join(workloadDir, 'worktrees', r.id)
+    // Skip any whose worktree is gone (ended elsewhere, pruned); the save below then drops them.
+    if (!fs.existsSync(worktree)) continue
+    const s: Session = Object.assign(newTerm(), {
+      id: r.id,
+      doc: r.doc ?? 'main.md',
+      quote: r.quote ?? '',
+      prefix: r.prefix ?? '',
+      suffix: r.suffix ?? '',
+      pos: r.pos ?? 0,
+      prompt: r.prompt ?? '',
+      branch: r.branch ?? `opendoc/${r.id}`,
+      worktree,
+      chat: r.chat ?? '',
+      docBase: r.docBase ?? {},
+    })
+    sessions.set(r.id, s)
+    if (s.chat) {
+      // The conversation's jsonl still sits in this worktree's project dir, so resuming finds it.
+      startTerm(s, worktree, resumeCmd(s.chat))
+      // Resuming isn't a turn — the agent waits for input.
+      s.busy = false
+    } else {
+      s.status = 'exited'
+    }
+    refreshUnmerged(s)
+  }
+  broadcastSessions()
+}
 
 // A commit of the worktree as it is now, uncommitted and untracked files included, leaving its index alone.
-async function snapshot(s: Session) {
-  const index = path.join(os.tmpdir(), `intj-index-${crypto.randomUUID()}`)
+async function snapshot(s: Pick<Session, 'id' | 'worktree'>) {
+  const index = path.join(os.tmpdir(), `opendoc-index-${crypto.randomUUID()}`)
   const env = { ...process.env, GIT_INDEX_FILE: index }
   try {
     await git(['add', '-A'], s.worktree, env)
     const tree = (await git(['write-tree'], s.worktree, env)).trim()
     const head = (await git(['rev-parse', 'HEAD'], s.worktree)).trim()
     if (tree === (await git(['rev-parse', 'HEAD^{tree}'], s.worktree)).trim()) return head
-    return (await git(['commit-tree', tree, '-p', head, '-m', `intj ${s.id}: snapshot for fork`], s.worktree)).trim()
+    return (await git(['commit-tree', tree, '-p', head, '-m', `opendoc ${s.id}: snapshot for fork`], s.worktree)).trim()
   } finally {
     fs.rmSync(index, { force: true })
   }
@@ -392,14 +641,14 @@ function copyChat(chat: string, worktree: string) {
 // With `from`, the session starts from that session's files and conversation as they are now.
 // The card is shown at once in a 'creating' state; the worktree is built and the agent started
 // off the event loop, so a slow repo doesn't block the request or freeze the server.
-function startSession(doc: string, anchor: Anchor, prompt: string, skill?: string, from?: Session) {
+function startSession(doc: string, anchor: Anchor, prompt: string, skill?: string, from?: Pick<Session, 'id' | 'worktree' | 'chat'>) {
   const { quote } = anchor
   const id = crypto.randomBytes(3).toString('hex')
-  const branch = `intj/${id}`
+  const branch = `opendoc/${id}`
   const worktree = path.join(workloadDir, 'worktrees', id)
   const chat = crypto.randomUUID()
   // For a skill the message leads with the slash command; this is also what the card shows.
-  const cmd = skill ? `/intj:${skill} ${prompt}`.trim() : prompt
+  const cmd = skill ? `/opendoc:${skill} ${prompt}`.trim() : prompt
   const s: Session = Object.assign(newTerm(), { id, doc, ...anchor, prompt: cmd, branch, worktree, chat, docBase: {} })
   sessions.set(id, s)
   broadcastSessions()
@@ -407,7 +656,7 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
   ;(async () => {
     try {
       const startPoint = from ? await snapshot(from) : 'HEAD'
-      // Materializing a huge repo's whole tree is the bottleneck. When INTJ_SPARSE names directories,
+      // Materializing a huge repo's whole tree is the bottleneck. When OPENDOC_SPARSE names directories,
       // do a cone checkout of just those (with a sparse index) so creation and later git ops touch far
       // fewer files; otherwise check out the full tree.
       const cone = sparseCone
@@ -435,14 +684,22 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       const file = path.join(worktree, workloadRel, doc)
       const context =
         `Doc: ${file}\n\n${quoted && `Selected text:\n${quoted}`}${prompt && `Comment: ${prompt}\n\n`}` +
-        `When done, use the intj:update-docs skill to update the markdown docs in ${path.dirname(file)}.`
+        `When done, use the opendoc:update-docs skill to update the markdown docs in ${path.dirname(file)}.`
       let text = skill ? `${cmd}\n\n${context}` : context
       // The forked conversation names the old worktree's paths, so point the agent at its own copy.
       if (from) text = `(Forked: you now work in ${worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
-      if (from) copyChat(from.chat, worktree)
-      const resume = from ? `--resume ${from.chat} --fork-session ` : ''
-      // Pass the prompt through the environment to avoid shell quoting issues.
-      startTerm(s, worktree, `${agentWithHooks()} ${resume}--session-id ${chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+      if (from && agentIsIsaac()) {
+        // isaac resolves the source by id (local or cloud) and branches it with `resume --fork`; the
+        // prompt can't be a launch argument, so type it in once the resumed session is ready. Status
+        // is tracked generically from output (noteActivity), so this path needs no special handling.
+        startTerm(s, worktree, `${agentCmd} resume ${from.chat} --fork`)
+        sendWhenReady(s, text)
+      } else {
+        if (from) copyChat(from.chat, worktree)
+        const resume = from ? `--resume ${from.chat} --fork-session ` : ''
+        // Pass the prompt through the environment to avoid shell quoting issues.
+        startTerm(s, worktree, `${agentCmd} ${resume}--session-id ${chat} "$OPENDOC_PROMPT"`, { OPENDOC_PROMPT: text })
+      }
       broadcastSessions()
     } catch (e) {
       // Building the worktree failed: drop the placeholder card and report it.
@@ -476,7 +733,7 @@ async function mergeSession(s: Session) {
   // Merge the code via git; docs are ignored, so only real code is committed and merged.
   await git(['add', '-A'], s.worktree)
   if ((await git(['status', '--porcelain'], s.worktree)).trim()) {
-    await git(['commit', '-m', `intj ${s.id}: ${s.prompt.split('\n')[0]}`], s.worktree)
+    await git(['commit', '-m', `opendoc ${s.id}: ${s.prompt.split('\n')[0]}`], s.worktree)
   }
   let codeConflict = false
   try {
@@ -508,13 +765,13 @@ function handOffConflicts(s: Session, docs: string[], code: boolean) {
   const codeText =
     'Merging the current branch into this worktree hit git conflicts (git status lists them). Resolve them ' +
     'keeping the intent of both sides, git add the files, then git commit --no-edit.'
-  const text = docs.length ? `/intj:merge-doc ${files}${code ? ` — then: ${codeText}` : ''}` : codeText
+  const text = docs.length ? `/opendoc:merge-doc ${files}${code ? ` — then: ${codeText}` : ''}` : codeText
   if (s.status === 'running') {
     s.term!.write(text)
     // Send Enter separately so the TUI doesn't treat it as part of a paste.
     setTimeout(() => s.term?.write('\r'), 300)
   } else {
-    startTerm(s, s.worktree, `${agentWithHooks()} --resume ${s.chat} "$INTJ_PROMPT"`, { INTJ_PROMPT: text })
+    startTerm(s, s.worktree, `${agentCmd} --resume ${s.chat} "$OPENDOC_PROMPT"`, { OPENDOC_PROMPT: text })
   }
 }
 
@@ -564,16 +821,6 @@ server.on('request', async (req, res) => {
     if (req.method === 'GET' && url === '/api/state') {
       return sendJson(res, 200, { workload: workloadDir && path.basename(workloadDir), agent: agentCmd, sparse: sparseCone.join(' ') })
     }
-    if (req.method === 'POST' && url === '/api/agent') {
-      const { command } = await readBody(req)
-      agentCmd = String(command ?? '').trim() || 'claude'
-      return sendJson(res, 200, { agent: agentCmd })
-    }
-    if (req.method === 'POST' && url === '/api/sparse') {
-      const { dirs } = await readBody(req)
-      sparseCone = parseCone(String(dirs ?? ''))
-      return sendJson(res, 200, { sparse: sparseCone.join(' ') })
-    }
     if (req.method === 'GET' && url === '/api/dirs') {
       const dir = path.resolve(searchParams.get('path') || startDir)
       const dirs = fs
@@ -589,8 +836,42 @@ server.on('request', async (req, res) => {
       return sendJson(res, 200, { project: projectDir, workloads })
     }
     if (req.method === 'POST' && url === '/api/workload') {
-      const { id } = await readBody(req)
+      const { id, agent, sparse } = await readBody(req)
+      // No project open (e.g. the server was restarted while the browser kept the picker open): bail
+      // clearly instead of running git — and thus the sparse-dir check — against the wrong directory.
+      if (!projectDir) return sendJson(res, 409, { error: 'no project open' })
+      // The agent command and sparse dirs come from the picker (the config it shows for this workload,
+      // seeded from the most recent one for a new workload). Reject sparse dirs that don't exist in the
+      // repo before opening, so a session's worktree isn't cone-checked out to nothing.
+      const cone =
+        sparse === undefined ? undefined : Array.isArray(sparse) ? sparse.map(String).map(normDir).filter(Boolean) : parseCone(String(sparse))
+      if (cone) {
+        const bad = await invalidSparseDirs(cone)
+        if (bad.length)
+          return sendJson(res, 400, { error: `Sparse ${bad.length > 1 ? 'directories' : 'directory'} not found in the repo: ${bad.join(', ')}` })
+      }
       await openWorkload(id)
+      // Apply the picker's values to this workload and persist them; fall back to its saved settings
+      // when the picker sent none (e.g. reopening straight from a link).
+      const saved = loadSettings(workloadDir)
+      agentCmd = typeof agent === 'string' ? agent.trim() || 'claude' : saved.agent
+      sparseCone = cone ?? saved.sparse
+      saveSettings()
+      // Bring back any sessions this workload had open (agentCmd is now set, so they resume correctly).
+      restoreSessions()
+      // Always refresh the client with this workload's cards (restoreSessions is silent when a workload
+      // has none) and its main-agent state (its terminal spawns lazily, so report idle until then).
+      broadcast({ type: 'sessions', list: activeSessions().map(publicSession) })
+      const am = mains.get(activeWid())
+      broadcast({ type: 'main', busy: am?.busy ?? false, status: am?.status ?? 'idle' })
+      return sendJson(res, 200, { ok: true, id: activeWid() })
+    }
+    if (req.method === 'GET' && url === '/api/workloads') {
+      return sendJson(res, 200, { workloads: projectDir ? listWorkloads() : [], active: activeWid(), project: projectDir })
+    }
+    if (req.method === 'POST' && url === '/api/workload/close') {
+      const { id } = await readBody(req)
+      closeWorkload(id)
       return sendJson(res, 200, { ok: true })
     }
     if (req.method === 'POST' && url === '/api/workload/delete') {
@@ -601,15 +882,48 @@ server.on('request', async (req, res) => {
     if (req.method === 'GET' && url === '/api/doc') {
       return sendJson(res, 200, { text: readDoc(docFile(workloadDir, docName)) })
     }
-    const a = url.match(/^\/api\/activity\/(\w+)$/)
-    if (req.method === 'POST' && a) {
-      setBusy(a[1], searchParams.get('busy') === '1')
+    if (req.method === 'POST' && url === '/api/doc') {
+      // Save an edit to the workload's doc, then broadcast it and sync it into live sessions (the
+      // directory watcher is non-recursive, so do this explicitly rather than rely on it).
+      const { text } = await readBody(req)
+      const body = String(text ?? '')
+      const file = docFile(workloadDir, docName)
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, body)
+      lastText.set(docName, body) // pre-empt the watcher's duplicate broadcast
+      broadcast({ type: 'content', name: docName, text: body })
+      syncAllDocs()
       return sendJson(res, 200, { ok: true })
+    }
+    if (req.method === 'GET' && url === '/api/file') {
+      // A doc's relative link to a repo file (e.g. a source file it references): serve it read-only so
+      // clicking it shows the file, instead of the browser navigating same-origin and the SPA server
+      // reloading the opendoc app. Resolved relative to the doc and confined to the repo.
+      const doc = searchParams.get('doc') ?? ''
+      const href = (searchParams.get('href') ?? '').split('#')[0]
+      const repoRoot = (await git(['rev-parse', '--show-toplevel'])).trim()
+      const target = path.resolve(path.dirname(path.resolve(workloadDir, doc)), href)
+      if (target !== repoRoot && !target.startsWith(repoRoot + path.sep)) return sendJson(res, 400, { error: 'outside the repo' })
+      try {
+        const data = fs.readFileSync(target)
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+        return res.end(data)
+      } catch {
+        return sendJson(res, 404, { error: `not found: ${href}` })
+      }
     }
     if (req.method === 'POST' && url === '/api/sessions') {
       const { doc, anchor, prompt, skill, from } = await readBody(req)
-      const src = from && sessions.get(from)
-      if (from && !src) return sendJson(res, 404, { error: `no session ${from}` })
+      let src: Pick<Session, 'id' | 'worktree' | 'chat'> | undefined
+      if (from === 'main') {
+        // Fork from the active workload's main agent: its checkout and conversation are the source.
+        const chat = mains.get(activeWid())?.chat
+        if (!chat) return sendJson(res, 400, { error: 'Open the main agent and send it a message before forking from it' })
+        src = { id: 'main', worktree: projectDir, chat }
+      } else if (from) {
+        src = sessions.get(from)
+        if (!src) return sendJson(res, 404, { error: `no session ${from}` })
+      }
       return sendJson(res, 200, publicSession(startSession(doc, anchor, prompt, skill, src)))
     }
     if (req.method === 'GET' && url === '/api/parent') {
@@ -700,7 +1014,9 @@ const watchDocs = () => {
 const eventsWss = new WebSocketServer({ noServer: true })
 eventsWss.on('connection', (ws) => {
   eventClients.add(ws)
-  ws.send(JSON.stringify({ type: 'sessions', list: [...sessions.values()].map(publicSession) }))
+  const am = mains.get(activeWid())
+  ws.send(JSON.stringify({ type: 'sessions', list: activeSessions().map(publicSession) }))
+  ws.send(JSON.stringify({ type: 'main', busy: am?.busy ?? false, status: am?.status ?? 'idle' }))
   ws.on('close', () => eventClients.delete(ws))
 })
 

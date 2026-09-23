@@ -1,5 +1,5 @@
 {
-  "name": "intj",
+  "name": "opendoc",
   "version": "0.1.0",
-  "description": "Skills for intj, a markdown-doc-driven AI coding workbench: update docs, resolve doc merge conflicts, split a doc."
+  "description": "Skills for opendoc, a markdown-doc-driven AI coding workbench: update docs, resolve doc merge conflicts, split a doc."
 }

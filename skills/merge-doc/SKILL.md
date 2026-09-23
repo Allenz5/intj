@@ -1,11 +1,11 @@
 ---
 name: merge-doc
-description: Resolve the conflict markers intj left in a session's markdown docs when merging them back into the workload. Takes the conflicted doc paths as its argument. Use when the user says "/intj:merge-doc", or when a doc merge left `<<<<<<< current` / `>>>>>>> session` markers to resolve.
+description: Resolve the conflict markers opendoc left in a session's markdown docs when merging them back into the workload. Takes the conflicted doc paths as its argument. Use when the user says "/opendoc:merge-doc", or when a doc merge left `<<<<<<< current` / `>>>>>>> session` markers to resolve.
 ---
 
 # Merge doc
 
-In intj the docs live outside git. Each session edits its own copy of the workload's docs in its worktree. On Merge, intj merges the workload's current docs into the session's copy first. Where both sides changed the same lines, the session's copy gets conflict markers:
+In opendoc the docs live outside git. Each session edits its own copy of the workload's docs in its worktree. On Merge, opendoc merges the workload's current docs into the session's copy first. Where both sides changed the same lines, the session's copy gets conflict markers:
 
 ```
 <<<<<<< current

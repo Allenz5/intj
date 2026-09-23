@@ -16,7 +16,78 @@ body {
 }
 #app {
   display: flex;
+  flex-direction: column;
   height: 100%;
+}
+#workspace {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+/* Top bar of workload tabs. */
+#tabbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  background: #e9ebee;
+  border-bottom: 1px solid #dbdee2;
+}
+/* The tabs themselves lay out in a horizontal row and scroll sideways if they overflow. */
+#tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  max-width: 220px;
+  padding: 4px 4px 4px 12px;
+  background: #f4f5f7;
+  border: 1px solid #d7dbe0;
+  border-radius: 7px;
+  cursor: pointer;
+  color: #4a5058;
+}
+.tab:hover {
+  background: #eef0f3;
+}
+.tab.active {
+  background: #fff;
+  border-color: #aeb8c6;
+  color: #1c1f24;
+  box-shadow: 0 1px 2px rgba(20, 24, 30, 0.1);
+}
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab-close {
+  flex: none;
+  padding: 0 5px;
+  border: none;
+  background: transparent;
+  color: #a0a6af;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 4px;
+}
+.tab-close:hover {
+  background: #f0d4d1;
+  color: #b3261e;
+}
+#tab-add {
+  flex: none;
+  padding: 3px 11px;
+  font-size: 15px;
+  line-height: 1.2;
 }
 #doc {
   flex: 1;
@@ -38,6 +109,22 @@ body {
   min-width: 0;
   padding: 16px 24px 80px 28px;
 }
+#doc-editor {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  resize: none;
+  padding: 16px 24px;
+  font-family: Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: inherit;
+  background: #fff;
+  white-space: pre-wrap;
+  tab-size: 2;
+}
 #preview pre {
   background: #f4f5f6;
   padding: 12px;
@@ -48,8 +135,8 @@ body {
   font-family: Menlo, monospace;
   font-size: 12.5px;
 }
-::highlight(intj-quote),
-::highlight(intj-pending) {
+::highlight(opendoc-quote),
+::highlight(opendoc-pending) {
   background: #fbe7a6;
 }
 #gutter {
@@ -80,6 +167,14 @@ body {
 .card.busy {
   opacity: 0.6;
   pointer-events: none;
+}
+/* The always-on main agent card. */
+.card-main {
+  border-left: 3px solid #3b82f6;
+}
+.card-main .card-prompt {
+  margin-top: 0;
+  font-weight: 600;
 }
 /* Picking a card to fork from. */
 .forking .card {
@@ -253,11 +348,18 @@ button:disabled {
   font-size: 12px;
   word-break: break-all;
 }
-#picker-agent,
-#picker-sparse {
+#workload-config {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e3e5e8;
+}
+#picker-agent {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin: 8px 0;
+}
+#picker-sparse {
   margin: 8px 0;
 }
 #picker-agent label,
@@ -266,8 +368,37 @@ button:disabled {
   font-size: 13px;
   white-space: nowrap;
 }
+.picker-sparse-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+#sparse-add {
+  padding: 0 8px;
+  line-height: 1.4;
+}
+.sparse-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.sparse-del {
+  flex: none;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  color: #a0a6af;
+  font-size: 16px;
+  line-height: 1;
+}
+.sparse-del:hover {
+  background: #f5d9d6;
+  color: #b3261e;
+}
 #picker-agent-cmd,
-#picker-sparse-dirs {
+.sparse-input {
   flex: 1;
   min-width: 0;
   font-family: Menlo, monospace;
@@ -275,6 +406,11 @@ button:disabled {
   padding: 4px 8px;
   border: 1px solid #cfd3d8;
   border-radius: 4px;
+}
+.workload-buttons {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
 }
 #dir-list,
 #workload-list {
@@ -301,6 +437,9 @@ button:disabled {
 #dir-list li:hover,
 #workload-list li:hover {
   background: #eef2f8;
+}
+#workload-list li.selected {
+  background: #dce9fb;
 }
 #workload-list li {
   display: flex;

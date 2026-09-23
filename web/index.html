@@ -2,7 +2,7 @@
 <html lang="zh">
   <head>
     <meta charset="utf-8" />
-    <title>intj</title>
+    <title>opendoc</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
@@ -12,14 +12,6 @@
           <h2>Choose a project folder</h2>
           <div id="dir-path"></div>
           <ul id="dir-list"></ul>
-          <div id="picker-agent">
-            <label for="picker-agent-cmd">Agent command</label>
-            <input id="picker-agent-cmd" placeholder="claude" autocomplete="off" spellcheck="false" />
-          </div>
-          <div id="picker-sparse">
-            <label for="picker-sparse-dirs">Sparse directories</label>
-            <input id="picker-sparse-dirs" placeholder="(optional) e.g. spark/dbr services/x" autocomplete="off" spellcheck="false" />
-          </div>
           <button id="dir-choose">Use this folder</button>
         </section>
         <section id="pick-workload" hidden>
@@ -27,17 +19,43 @@
           <div id="workload-project"></div>
           <button id="workload-new">New workload</button>
           <ul id="workload-list"></ul>
+          <div id="workload-config">
+            <div id="picker-agent">
+              <label for="picker-agent-cmd">Agent command</label>
+              <input id="picker-agent-cmd" placeholder="claude" autocomplete="off" spellcheck="false" />
+            </div>
+            <div id="picker-sparse">
+              <div class="picker-sparse-head">
+                <label>Sparse directories</label>
+                <button id="sparse-add" type="button" title="Add a directory">+</button>
+              </div>
+              <div id="sparse-list"></div>
+            </div>
+            <div class="workload-buttons">
+              <button id="workload-open">Open workload</button>
+              <button id="workload-cancel" hidden>Cancel</button>
+            </div>
+          </div>
         </section>
       </div>
     </div>
     <div id="app" hidden>
+      <div id="tabbar">
+        <div id="tabs"></div>
+        <button id="tab-add" title="Open or create a workload">+</button>
+      </div>
+      <div id="workspace">
       <section id="doc">
         <header class="bar">
           <span id="doc-name"></span>
           <span class="spacer"></span>
           <button id="doc-up" hidden>Back</button>
+          <button id="doc-edit">Edit</button>
+          <button id="doc-save" hidden>Save</button>
+          <button id="doc-cancel" hidden>Cancel</button>
         </header>
         <div id="doc-scroll">
+          <textarea id="doc-editor" spellcheck="false" hidden></textarea>
           <div id="doc-body">
             <article id="preview"></article>
             <aside id="gutter"></aside>
@@ -53,12 +71,14 @@
         </header>
         <div id="terms"></div>
       </section>
+      </div>
     </div>
     <div id="popup" hidden>
       <input id="popup-input" placeholder="What should Claude do?" autocomplete="off" />
       <button id="popup-start">Start chat</button>
       <button id="popup-fork" title="Then click a comment on the right to continue from its files and conversation">Fork chat</button>
       <button id="popup-split" title="Shorten the selected module here and move its detail into a linked child doc">Split doc</button>
+      <button id="popup-copy" title="Copy the selected text (or press Cmd/Ctrl+C)">Copy</button>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>
