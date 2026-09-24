@@ -974,19 +974,26 @@ $('workload-new').onclick = selectNew
 
 $('workload-open').onclick = async () => {
   if (!(await ensureProject())) return alert('Reopen the project folder first')
-  const res = await post('/api/workload', {
-    id: selectedId ?? undefined,
-    agent: pickerAgentInput.value,
-    sparse: getSparseInputs(),
-    branch: pickerBranchInput.value.trim(),
-    base: pickerBaseInput.value.trim(),
-  })
-  const data = await res.json()
-  if (!res.ok) return alert(data.error)
-  $('picker').hidden = true
-  if (pickerMode === 'start') start(data.id)
-  else applySwitch(data.id)
-  refreshWorkloads()
+  // Creating a workload can fetch and build a worktree, so show a spinner until it resolves.
+  const btn = $('workload-open')
+  btn.classList.add('loading')
+  try {
+    const res = await post('/api/workload', {
+      id: selectedId ?? undefined,
+      agent: pickerAgentInput.value,
+      sparse: getSparseInputs(),
+      branch: pickerBranchInput.value.trim(),
+      base: pickerBaseInput.value.trim(),
+    })
+    const data = await res.json()
+    if (!res.ok) return alert(data.error)
+    $('picker').hidden = true
+    if (pickerMode === 'start') start(data.id)
+    else applySwitch(data.id)
+    refreshWorkloads()
+  } finally {
+    btn.classList.remove('loading')
+  }
 }
 
 function start(active: string) {

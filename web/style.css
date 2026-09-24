@@ -297,6 +297,30 @@ button:disabled {
   opacity: 0.5;
   cursor: default;
 }
+/* In-flight state: hide the label and spin, without the dimming that :disabled applies. */
+button.loading {
+  color: transparent;
+  position: relative;
+  pointer-events: none;
+}
+button.loading::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid #c3c8cf;
+  border-top-color: #6b7380;
+  border-radius: 50%;
+  animation: opendoc-spin 0.6s linear infinite;
+}
+@keyframes opendoc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 #popup {
   position: fixed;
   z-index: 10;

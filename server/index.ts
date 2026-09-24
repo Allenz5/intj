@@ -23,7 +23,10 @@ let workloadRel = ''
 let agentCmd = process.env.OPENDOC_AGENT ?? 'claude'
 // Directories a session's worktree is cone-checked-out to; empty means a full checkout. Set from the
 // picker (or OPENDOC_SPARSE) to speed up worktree creation on a huge repo.
-const normDir = (d: string) => d.trim().replace(/\/+$/, '')
+// Strip zero-width/control characters (which JS trim() misses and which sneak in via paste/IME) before
+// trimming whitespace and trailing slashes, so an invisible char in a pasted dir name can't make a
+// valid path look "not found in the repo".
+const normDir = (d: string) => d.replace(/[\u0000-\u001F\u007F​-‍﻿]/g, '').trim().replace(/\/+$/, '')
 // Multiple dirs, separated by whitespace, commas, or colons; trailing slashes trimmed.
 const parseCone = (s: string) => s.split(/[\s:,]+/).map(normDir).filter(Boolean)
 let sparseCone = parseCone(process.env.OPENDOC_SPARSE ?? '')
@@ -444,7 +447,9 @@ function listDocs(root: string): string[] {
   const out: string[] = []
   const walk = (rel: string) => {
     for (const e of fs.readdirSync(path.join(root, rel), { withFileTypes: true })) {
-      if (e.name === 'worktrees') continue
+      // Skip the session worktrees and the foundation worktree — both live under the workload dir but
+      // hold repo checkouts, not docs; walking them would slurp every .md in the tree.
+      if (rel === '' && (e.name === 'worktrees' || e.name === 'root')) continue
       const r = rel ? path.join(rel, e.name) : e.name
       if (e.isDirectory()) walk(r)
       else if (e.name.endsWith('.md')) out.push(r)
@@ -894,7 +899,10 @@ server.on('request', async (req, res) => {
       if (cone) {
         const bad = await invalidSparseDirs(cone)
         if (bad.length)
-          return sendJson(res, 400, { error: `Sparse ${bad.length > 1 ? 'directories' : 'directory'} not found in the repo: ${bad.join(', ')}` })
+          return sendJson(res, 400, {
+            // Quote each value so any stray/invisible character in it is visible in the message.
+            error: `Sparse ${bad.length > 1 ? 'directories' : 'directory'} not found in the repo: ${bad.map((d) => JSON.stringify(d)).join(', ')}`,
+          })
       }
       const created = await openWorkload(id)
       // Apply the picker's values to this workload and persist them; fall back to its saved settings
