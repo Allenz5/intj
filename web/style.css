@@ -388,6 +388,17 @@ button.loading::after {
   flex: none;
   width: 130px;
 }
+.picker-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  color: #6b7380;
+  font-size: 13px;
+}
+.picker-check input {
+  flex: none;
+}
 #picker-agent label,
 .picker-field label {
   color: #6b7380;

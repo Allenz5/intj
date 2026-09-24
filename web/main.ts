@@ -30,6 +30,8 @@ let docParent: string | null = null
 let openTabs: string[] = []
 let activeWorkload = ''
 let allWorkloads: WorkloadInfo[] = []
+// Whether the server has the quicktree CLI, so the picker can offer the "Use quicktree" checkbox.
+let clientHasQuicktree = false
 let clientProject = ''
 let pickerMode: 'start' | 'add' = 'start'
 let eventsWs: WebSocket | null = null
@@ -661,10 +663,11 @@ new ResizeObserver(() => {
 // A workload's agent command (default 'claude'), plus its foundation-worktree fields: the branch and the
 // head it derives from. Shown on the workload page; branch/base apply only when creating a workload,
 // since an existing workload's worktree is already fixed.
-type WorkloadInfo = { id: string; title: string; agent: string; branch: string; base: string }
+type WorkloadInfo = { id: string; title: string; agent: string; branch: string; base: string; quicktree: boolean }
 const pickerAgentInput = $<HTMLInputElement>('picker-agent-cmd')
 const pickerBranchInput = $<HTMLInputElement>('picker-branch')
 const pickerBaseInput = $<HTMLInputElement>('picker-base')
+const pickerQuicktreeInput = $<HTMLInputElement>('picker-quicktree')
 
 // ---- Divider ----
 
@@ -746,6 +749,7 @@ function renderTabs() {
 async function refreshWorkloads() {
   const data = await (await fetch('/api/workloads')).json()
   allWorkloads = data.workloads ?? []
+  clientHasQuicktree = !!data.hasQuicktree
   if (data.project) clientProject = data.project
   openTabs = openTabs.filter((id) => allWorkloads.some((w: WorkloadInfo) => w.id === id))
   saveTabs()
@@ -871,6 +875,7 @@ async function chooseProject(dir: string) {
   const data = await res.json()
   if (!res.ok) return alert(data.error)
   clientProject = data.project
+  clientHasQuicktree = !!data.hasQuicktree
   loadTabs()
   allWorkloads = data.workloads
   pickerMode = 'start'
@@ -929,10 +934,13 @@ function highlightSelected() {
   }
 }
 
-function fillConfig(agent: string, branch = '', base = '') {
+function fillConfig(agent: string, branch = '', base = '', quicktree = false) {
   pickerAgentInput.value = agent
   pickerBranchInput.value = branch
   pickerBaseInput.value = base
+  pickerQuicktreeInput.checked = quicktree
+  // The quicktree checkbox is only meaningful when the server has the CLI.
+  $('picker-quicktree-row').hidden = !clientHasQuicktree
 }
 
 // Select an existing workload: show (and let the user edit) its own settings before opening. Its
@@ -940,7 +948,7 @@ function fillConfig(agent: string, branch = '', base = '') {
 function selectWorkload(id: string) {
   selectedId = id
   const w = workloads.find((x) => x.id === id)
-  if (w) fillConfig(w.agent, w.branch, w.base)
+  if (w) fillConfig(w.agent, w.branch, w.base, w.quicktree)
   $('picker-worktree').hidden = true
   highlightSelected()
   $('workload-open').textContent = 'Open workload'
@@ -951,7 +959,7 @@ function selectWorkload(id: string) {
 function selectNew() {
   selectedId = null
   const recent = workloads[0]
-  fillConfig(recent?.agent ?? 'claude', '', recent?.base ?? '')
+  fillConfig(recent?.agent ?? 'claude', '', recent?.base ?? '', recent?.quicktree ?? false)
   $('picker-worktree').hidden = false
   highlightSelected()
   $('workload-open').textContent = 'Create workload'
@@ -969,6 +977,7 @@ $('workload-open').onclick = async () => {
       agent: pickerAgentInput.value,
       branch: pickerBranchInput.value.trim(),
       base: pickerBaseInput.value.trim(),
+      quicktree: pickerQuicktreeInput.checked,
     })
     const data = await res.json()
     if (!res.ok) return alert(data.error)

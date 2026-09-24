@@ -26,6 +26,14 @@ let agentCmd = process.env.OPENDOC_AGENT ?? 'claude'
 // an empty branch means no worktree — the workload runs on the main checkout, as before.
 let workloadBranch = ''
 let workloadBase = ''
+// Whether the open workload's worktrees are quicktree overlay mounts (fast, whole-tree) rather than full
+// git worktrees — chosen per workload in the picker, only offered when the quicktree CLI is present.
+let workloadUseQt = false
+// The open workload's foundation worktree: its working directory (a quicktree mount or `.opendoc/<id>/
+// root`) and, for a quicktree, the mount name used to remove it. Empty path = no foundation (runs on the
+// main checkout). Set when the workload is opened.
+let workloadRootPath = ''
+let workloadRootQt = ''
 const port = Number(process.env.PORT ?? 5173)
 
 // Git runs off the event loop: on a large repo a status/worktree call takes seconds, and a
@@ -34,12 +42,46 @@ const execFileP = promisify(execFile)
 const git = async (args: string[], cwd = projectDir, env = process.env) =>
   (await execFileP('git', args, { cwd, encoding: 'utf8', env, maxBuffer: 256 * 1024 * 1024 })).stdout
 
+// ---- Worktree backend: quicktree (fast overlay mount) or plain full git worktree ----
+
+// quicktree gives each worktree a fast overlayfs mount of the whole repo under ~/.quicktree instead of a
+// full checkout — offered per workload only when its CLI is installed.
+const HAS_QUICKTREE = await execFileP('sh', ['-c', 'command -v quicktree']).then(() => true, () => false)
+
+// Make a worktree on a NEW `branch` starting from `startRef`. With quicktree it returns the overlay mount
+// path and the mount name (needed to remove it later); otherwise it checks a full git worktree out at
+// `gitDir` and returns that path with an empty name.
+async function makeWorktree(branch: string, startRef: string, gitDir: string, useQt: boolean): Promise<{ path: string; qt: string }> {
+  if (useQt) {
+    const out = await execFileP('quicktree', ['--json', 'create', '--branch', branch, '--base', startRef], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      env: process.env,
+      maxBuffer: 64 * 1024 * 1024,
+    })
+    const info = JSON.parse(out.stdout)
+    return { path: info.mount_path, qt: info.name }
+  }
+  await git(['worktree', 'add', '-b', branch, gitDir, startRef])
+  return { path: gitDir, qt: '' }
+}
+
+// Tear a worktree down: remove the quicktree mount by name, or drop the git worktree and its branch.
+async function dropWorktree(worktree: string, branch: string, qt: string) {
+  if (qt) {
+    await execFileP('quicktree', ['remove', qt, '-f'], { cwd: projectDir, env: process.env }).catch(() => {})
+  } else {
+    await git(['worktree', 'remove', '--force', worktree]).catch(() => {})
+    await git(['branch', '-D', branch]).catch(() => {})
+  }
+}
+
 // ---- Per-workload settings ----
 
 // Each workload keeps its own agent command in its settings.json (untracked, like the rest of .opendoc);
 // a new workload copies the most recent one's (the picker seeds them). Applied to the live agentCmd when
 // the workload is opened, since sessions run against the open workload.
-type Settings = { agent: string; branch: string; base: string }
+type Settings = { agent: string; branch: string; base: string; quicktree: boolean; rootPath: string; rootQt: string }
 const settingsFile = (workloadDir: string) => path.join(workloadDir, 'settings.json')
 function loadSettings(workloadDir: string): Settings {
   try {
@@ -48,16 +90,23 @@ function loadSettings(workloadDir: string): Settings {
       agent: typeof s.agent === 'string' && s.agent.trim() ? s.agent : 'claude',
       branch: typeof s.branch === 'string' ? s.branch.trim() : '',
       base: typeof s.base === 'string' ? s.base.trim() : '',
+      quicktree: !!s.quicktree,
+      rootPath: typeof s.rootPath === 'string' ? s.rootPath : '',
+      rootQt: typeof s.rootQt === 'string' ? s.rootQt : '',
     }
   } catch {
-    return { agent: 'claude', branch: '', base: '' }
+    return { agent: 'claude', branch: '', base: '', quicktree: false, rootPath: '', rootQt: '' }
   }
 }
 function saveSettings() {
   if (!workloadDir) return
   fs.writeFileSync(
     settingsFile(workloadDir),
-    JSON.stringify({ agent: agentCmd, branch: workloadBranch, base: workloadBase }, null, 2),
+    JSON.stringify(
+      { agent: agentCmd, branch: workloadBranch, base: workloadBase, quicktree: workloadUseQt, rootPath: workloadRootPath, rootQt: workloadRootQt },
+      null,
+      2,
+    ),
   )
 }
 
@@ -65,39 +114,36 @@ function saveSettings() {
 
 const WORKLOAD = /^\d{8}-\d{4}-[0-9a-f-]{36}$/
 
-// A workload's foundation worktree lives at `.opendoc/<id>/root`. When it exists it stands in for the
-// main checkout: the main agent runs in it and sessions branch from it, so the real checkout is never
-// touched. Workloads created without a branch (or before this) have none and fall back to the main
-// checkout.
-const rootDir = (dir = workloadDir) => path.join(dir, 'root')
-const hasRoot = (dir = workloadDir) => !!dir && fs.existsSync(rootDir(dir))
-// The active workload's foundation, and the same resolved from a session's own worktree path
-// (`<workloadDir>/worktrees/<id>`) so per-session git ops stay correct even if the active tab changed.
-const workloadRoot = () => (hasRoot() ? rootDir() : projectDir)
-const sessionWl = (s: Pick<Session, 'worktree'>) => path.dirname(path.dirname(s.worktree))
-const sessionRoot = (s: Pick<Session, 'worktree'>) => (hasRoot(sessionWl(s)) ? rootDir(sessionWl(s)) : projectDir)
+// A workload's foundation worktree stands in for the main checkout: the main agent runs in it and
+// sessions branch from it, so the real checkout is never touched. Its working directory is a quicktree
+// mount or `.opendoc/<id>/root`; the path (and quicktree mount name) are stored in the workload's
+// settings and loaded into workloadRootPath/workloadRootQt when it opens. Workloads created without a
+// branch (or before this) have none and fall back to the main checkout.
+const gitRootDir = (dir = workloadDir) => path.join(dir, 'root')
+const hasRoot = () => !!workloadRootPath
+// The active workload's foundation, and the same for a session (stored on the session so per-session git
+// ops stay correct even if the active tab changed since).
+const workloadRoot = () => workloadRootPath || projectDir
+const sessionRoot = (s: Pick<Session, 'root'>) => s.root || projectDir
 
-// Build the open workload's foundation worktree on `branch`, derived from `base`. The base is always
+// Build the open workload's foundation worktree on `branch`, derived from `base`, recording its path (and
+// quicktree name) in the module globals so callers and saveSettings can persist it. The base is always
 // fetched from origin first so the worktree starts from the latest remote state, falling back to a local
-// ref when there's no remote (or the fetch fails). An existing branch is reused as-is (base ignored). No
-// branch means the workload stays on the main checkout.
+// ref when there's no remote (or the fetch fails). No branch means the workload stays on the main checkout.
 async function createWorktree(branch: string, base: string) {
   if (!workloadDir || !branch || hasRoot()) return
-  const dir = rootDir()
-  const exists = await git(['rev-parse', '--verify', `refs/heads/${branch}`]).then(() => true, () => false)
-  let startRef = branch
-  if (!exists) {
-    const head = base || (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
-    const fetched = await git(['fetch', 'origin', head]).then(() => true, () => false)
-    if (fetched) {
-      startRef = `origin/${head}`
-    } else {
-      const ok = await git(['rev-parse', '--verify', '--quiet', `${head}^{commit}`]).then(() => true, () => false)
-      if (!ok) throw new Error(`Base "${head}" not found locally and could not be fetched from origin`)
-      startRef = head
-    }
+  const head = base || (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
+  const fetched = await git(['fetch', 'origin', head]).then(() => true, () => false)
+  let startRef = head
+  if (fetched) {
+    startRef = `origin/${head}`
+  } else {
+    const ok = await git(['rev-parse', '--verify', '--quiet', `${head}^{commit}`]).then(() => true, () => false)
+    if (!ok) throw new Error(`Base "${head}" not found locally and could not be fetched from origin`)
   }
-  await git(['worktree', 'add', ...(exists ? [dir, branch] : ['-b', branch, dir, startRef])])
+  const { path: p, qt } = await makeWorktree(branch, startRef, gitRootDir(), workloadUseQt)
+  workloadRootPath = p
+  workloadRootQt = qt
 }
 
 async function openProject(dir: string) {
@@ -124,8 +170,8 @@ function listWorkloads() {
   const ids = fs.existsSync(root) ? fs.readdirSync(root).filter((n) => WORKLOAD.test(n)).sort().reverse() : []
   return ids.map((id) => {
     const dir = path.join(root, id)
-    const { agent, branch, base } = loadSettings(dir)
-    return { id, title: readDoc(path.join(dir, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '', agent, branch, base }
+    const { agent, branch, base, quicktree } = loadSettings(dir)
+    return { id, title: readDoc(path.join(dir, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '', agent, branch, base, quicktree }
   })
 }
 
@@ -163,8 +209,12 @@ async function deleteWorkload(id: string) {
     mains.delete(id)
   }
   for (const s of [...sessions.values()]) {
-    if (s.worktree.startsWith(dir + path.sep)) await endSession(s)
+    if (s.wl === dir) await endSession(s)
   }
+  // Drop the foundation worktree (a quicktree mount lives outside the folder, so remove it by name; a git
+  // one lives under the folder and goes with it). The user's foundation branch is left intact.
+  const { rootQt, rootPath } = loadSettings(dir)
+  if (rootQt) await dropWorktree(rootPath, '', rootQt)
   // Docs are untracked, so nothing to commit: just drop the folder and prune stale worktrees.
   if (workloadDir === dir) closeDocWatcher()
   fs.rmSync(dir, { recursive: true, force: true })
@@ -172,6 +222,8 @@ async function deleteWorkload(id: string) {
   if (workloadDir === dir) {
     workloadDir = ''
     workloadRel = ''
+    workloadRootPath = ''
+    workloadRootQt = ''
   }
   return listWorkloads()
 }
@@ -187,6 +239,8 @@ function closeWorkload(id: string) {
     closeDocWatcher()
     workloadDir = ''
     workloadRel = ''
+    workloadRootPath = ''
+    workloadRootQt = ''
   }
   const m = mains.get(id)
   if (m) {
@@ -195,7 +249,7 @@ function closeWorkload(id: string) {
     mains.delete(id)
   }
   for (const s of [...sessions.values()]) {
-    if (s.worktree.startsWith(dir + path.sep)) {
+    if (s.wl === dir) {
       s.term?.kill()
       for (const ws of s.clients) ws.close()
       sessions.delete(s.id)
@@ -424,6 +478,12 @@ type Session = AgentTerm & {
   prompt: string
   branch: string
   worktree: string
+  // The workload this session belongs to (its `.opendoc/<id>` dir), its foundation worktree (what it
+  // branched from and merges back into), and — for a quicktree worktree — the mount name used to remove
+  // it. Stored explicitly because a quicktree worktree lives under ~/.quicktree, not inside the workload.
+  wl: string
+  root: string
+  qt: string
   // The agent's conversation id, so a fork can continue the conversation.
   chat: string
   // Each doc's content when the session started, its 3-way-merge base for merging changes back.
@@ -517,7 +577,7 @@ function syncAllDocs() {
   syncTimer = setTimeout(async () => {
     for (const s of sessions.values()) {
       // Sessions of another workload, and ones still copying their docs in, have nothing to sync.
-      if (s.status === 'creating' || !s.worktree.startsWith(workloadDir + path.sep)) continue
+      if (s.status === 'creating' || s.wl !== workloadDir) continue
       try {
         await syncDocs(s)
       } catch {}
@@ -588,7 +648,7 @@ const publicSession = (s: Session) => {
 }
 // Only the active workload's sessions are shown/broadcast; the others' agents stay alive in the map
 // but belong to background tabs.
-const activeSessions = () => [...sessions.values()].filter((s) => !!workloadDir && s.worktree.startsWith(workloadDir + path.sep))
+const activeSessions = () => [...sessions.values()].filter((s) => !!workloadDir && s.wl === workloadDir)
 const broadcastSessions = () => {
   saveSessions()
   broadcast({ type: 'sessions', list: activeSessions().map(publicSession) })
@@ -603,10 +663,10 @@ const broadcastSessions = () => {
 const sessionsFile = () => path.join(workloadDir, 'sessions.json')
 function saveSessions() {
   if (!workloadDir) return
-  const mine = [...sessions.values()].filter((s) => s.worktree.startsWith(workloadDir + path.sep))
+  const mine = [...sessions.values()].filter((s) => s.wl === workloadDir)
   try {
-    const data = mine.map(({ id, doc, quote, prefix, suffix, pos, prompt, branch, worktree, chat, docBase }) => ({
-      id, doc, quote, prefix, suffix, pos, prompt, branch, worktree, chat, docBase,
+    const data = mine.map(({ id, doc, quote, prefix, suffix, pos, prompt, branch, worktree, wl, root, qt, chat, docBase }) => ({
+      id, doc, quote, prefix, suffix, pos, prompt, branch, worktree, wl, root, qt, chat, docBase,
     }))
     fs.writeFileSync(sessionsFile(), JSON.stringify(data, null, 2))
   } catch {}
@@ -623,7 +683,9 @@ function restoreSessions() {
   if (!Array.isArray(saved)) return
   for (const r of saved) {
     if (!r?.id || sessions.has(r.id)) continue
-    const worktree = path.join(workloadDir, 'worktrees', r.id)
+    // Older saves nested the worktree under the workload; newer ones (and all quicktree mounts) store the
+    // real path. Fall back to the old layout for compatibility.
+    const worktree = r.worktree ?? path.join(workloadDir, 'worktrees', r.id)
     // Skip any whose worktree is gone (ended elsewhere, pruned); the save below then drops them.
     if (!fs.existsSync(worktree)) continue
     const s: Session = Object.assign(newTerm(), {
@@ -636,6 +698,9 @@ function restoreSessions() {
       prompt: r.prompt ?? '',
       branch: r.branch ?? `opendoc/${r.id}`,
       worktree,
+      wl: r.wl ?? workloadDir,
+      root: r.root ?? workloadRoot(),
+      qt: r.qt ?? '',
       chat: r.chat ?? '',
       docBase: r.docBase ?? {},
     })
@@ -678,11 +743,14 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
   const { quote } = anchor
   const id = crypto.randomBytes(3).toString('hex')
   const branch = `opendoc/${id}`
-  const worktree = path.join(workloadDir, 'worktrees', id)
+  const gitDir = path.join(workloadDir, 'worktrees', id)
   const chat = crypto.randomUUID()
   // For a skill the message leads with the slash command; this is also what the card shows.
   const cmd = skill ? `/opendoc:${skill} ${prompt}`.trim() : prompt
-  const s: Session = Object.assign(newTerm(), { id, doc, ...anchor, prompt: cmd, branch, worktree, chat, docBase: {} })
+  // worktree/qt are filled in once the worktree is built (a quicktree mount's path isn't known upfront).
+  const s: Session = Object.assign(newTerm(), {
+    id, doc, ...anchor, prompt: cmd, branch, worktree: '', wl: workloadDir, root: workloadRoot(), qt: '', chat, docBase: {},
+  })
   sessions.set(id, s)
   broadcastSessions()
 
@@ -693,11 +761,13 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       // the agent must commit for its work to flow down to sessions derived from it.
       const srcWorktree = from ? from.worktree : workloadRoot()
       const startPoint = (await git(['rev-parse', 'HEAD'], srcWorktree)).trim()
-      await git(['worktree', 'add', '-b', branch, worktree, startPoint])
+      const built = await makeWorktree(branch, startPoint, gitDir, workloadUseQt)
+      s.worktree = built.path
+      s.qt = built.qt
       // Docs are outside git: copy the workload's docs into the worktree and record each one's
       // content as this session's merge base. A fork starts from its source session's docs.
       const srcDocDir = from ? path.join(from.worktree, workloadRel) : workloadDir
-      const destDocDir = path.join(worktree, workloadRel)
+      const destDocDir = path.join(s.worktree, workloadRel)
       for (const rel of listDocs(srcDocDir)) {
         const src = path.join(srcDocDir, rel)
         const dst = path.join(destDocDir, rel)
@@ -707,24 +777,24 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       }
       const quoted = quote ? quote.split('\n').map((l) => `> ${l}`).join('\n') + '\n\n' : ''
       // The doc's copy in this session's worktree, which is the one the agent should update.
-      const file = path.join(worktree, workloadRel, doc)
+      const file = path.join(s.worktree, workloadRel, doc)
       const context =
         `Doc: ${file}\n\n${quoted && `Selected text:\n${quoted}`}${prompt && `Comment: ${prompt}\n\n`}` +
         `When done, use the opendoc:update-docs skill to update the markdown docs in ${path.dirname(file)}.`
       let text = skill ? `${cmd}\n\n${context}` : context
       // The forked conversation names the old worktree's paths, so point the agent at its own copy.
-      if (from) text = `(Forked: you now work in ${worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
+      if (from) text = `(Forked: you now work in ${s.worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
       if (from && agentIsIsaac()) {
         // isaac resolves the source by id (local or cloud) and branches it with `resume --fork`; the
         // prompt can't be a launch argument, so type it in once the resumed session is ready. Status
         // is tracked generically from output (noteActivity), so this path needs no special handling.
-        startTerm(s, worktree, `${agentCmd} resume ${from.chat} --fork`)
+        startTerm(s, s.worktree, `${agentCmd} resume ${from.chat} --fork`)
         sendWhenReady(s, text)
       } else {
-        if (from) copyChat(from.chat, worktree)
+        if (from) copyChat(from.chat, s.worktree)
         const resume = from ? `--resume ${from.chat} --fork-session ` : ''
         // Pass the prompt through the environment to avoid shell quoting issues.
-        startTerm(s, worktree, `${agentCmd} ${resume}--session-id ${chat} "$OPENDOC_PROMPT"`, { OPENDOC_PROMPT: text })
+        startTerm(s, s.worktree, `${agentCmd} ${resume}--session-id ${chat} "$OPENDOC_PROMPT"`, { OPENDOC_PROMPT: text })
       }
       broadcastSessions()
     } catch (e) {
@@ -806,13 +876,8 @@ function handOffConflicts(s: Session, docs: string[], code: boolean) {
 async function endSession(s: Session) {
   s.term?.kill()
   for (const ws of s.clients) ws.close()
-  // The worktree may not exist yet if the session is still being created.
-  try {
-    await git(['worktree', 'remove', '--force', s.worktree])
-  } catch {}
-  try {
-    await git(['branch', '-D', s.branch])
-  } catch {}
+  // Drop the worktree (quicktree mount or git worktree+branch); it may not exist yet if still creating.
+  if (s.worktree) await dropWorktree(s.worktree, s.branch, s.qt)
   sessions.delete(s.id)
   unmergedCache.delete(s.id)
   broadcastSessions()
@@ -861,21 +926,25 @@ server.on('request', async (req, res) => {
     if (req.method === 'POST' && url === '/api/project') {
       const { path: dir } = await readBody(req)
       const workloads = await openProject(dir)
-      return sendJson(res, 200, { project: projectDir, workloads })
+      return sendJson(res, 200, { project: projectDir, workloads, hasQuicktree: HAS_QUICKTREE })
     }
     if (req.method === 'POST' && url === '/api/workload') {
-      const { id, agent, branch, base } = await readBody(req)
+      const { id, agent, branch, base, quicktree } = await readBody(req)
       // No project open (e.g. the server was restarted while the browser kept the picker open): bail
       // clearly instead of running git against the wrong directory.
       if (!projectDir) return sendJson(res, 409, { error: 'no project open' })
       const created = await openWorkload(id)
       // Apply the picker's values to this workload and persist them; fall back to its saved settings
-      // when the picker sent none (e.g. reopening straight from a link). Branch/base only define a new
-      // workload's foundation worktree, so they come from its saved settings for an existing one.
+      // when the picker sent none (e.g. reopening straight from a link). Branch/base/quicktree only
+      // define a new workload's foundation worktree, so they come from saved settings for an existing one.
       const saved = loadSettings(workloadDir)
       agentCmd = typeof agent === 'string' ? agent.trim() || 'claude' : saved.agent
       workloadBranch = created && typeof branch === 'string' ? branch.trim() : saved.branch
       workloadBase = created && typeof base === 'string' ? base.trim() : saved.base
+      workloadUseQt = (created ? !!quicktree : saved.quicktree) && HAS_QUICKTREE
+      // Load the (already-built) foundation worktree of an existing workload; a new one is built below.
+      workloadRootPath = created ? '' : saved.rootPath
+      workloadRootQt = created ? '' : saved.rootQt
       saveSettings()
       // A new workload with a branch gets its own foundation worktree, derived from the fetched base.
       // If it can't be built, surface the error and stop — the user asked for a specific base to work
@@ -883,6 +952,7 @@ server.on('request', async (req, res) => {
       if (created && workloadBranch) {
         try {
           await createWorktree(workloadBranch, workloadBase)
+          saveSettings() // persist the foundation worktree's path/name that createWorktree just set
         } catch (e) {
           await deleteWorkload(activeWid())
           return sendJson(res, 400, { error: `Could not create worktree: ${errorText(e)}` })
@@ -898,7 +968,7 @@ server.on('request', async (req, res) => {
       return sendJson(res, 200, { ok: true, id: activeWid() })
     }
     if (req.method === 'GET' && url === '/api/workloads') {
-      return sendJson(res, 200, { workloads: projectDir ? listWorkloads() : [], active: activeWid(), project: projectDir })
+      return sendJson(res, 200, { workloads: projectDir ? listWorkloads() : [], active: activeWid(), project: projectDir, hasQuicktree: HAS_QUICKTREE })
     }
     if (req.method === 'POST' && url === '/api/workload/close') {
       const { id } = await readBody(req)

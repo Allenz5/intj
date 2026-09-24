@@ -22,14 +22,8 @@ PORT=6000 npm run dev           # serve on a different port
 ## Use
 
 1. **Pick a project folder** — any git repo (a non-repo is `git init`ed for you). On this start
-   page you also set, and can edit before opening:
-   - **Agent command** — the shell command that launches the agent (default `claude`; any CLI
-     agent works).
-   - **Sparse directories** — space-separated paths to cone-checkout in each session's worktree,
-     to keep worktree creation fast on a huge repo. Leave empty for a full checkout.
-
-   Both are saved per project under `.opendoc/settings.json` and reloaded into the inputs when you
-   browse back to that folder.
+   page you also set the **agent command** — the shell command that launches the agent (default
+   `claude`; any CLI agent works). It is saved per project under `.opendoc/settings.json`.
 
 2. **Pick or create a workload** — a workload is a set of markdown docs kept under
    `.opendoc/<timestamp>-<uuid>/`, starting from `main.md`. Docs live outside git and are never
@@ -39,6 +33,10 @@ PORT=6000 npm run dev           # serve on a different port
    - **Derive from (head)** — the base ref the foundation starts from. It is fetched from origin
      first, so the workload begins from the latest remote state. Leave the branch empty to skip the
      worktree and run on the main checkout, as before.
+   - **Use quicktree** — shown when the [quicktree](https://github.com/) CLI is installed. When
+     checked, the foundation and every session are fast overlayfs mounts of the whole repo (under
+     `~/.quicktree`) instead of full git checkouts — much faster on a large monorepo. Unchecked (or
+     without the CLI), they are plain full `git worktree`s.
 
    The workload's main agent runs in this foundation worktree, and every session branches from it.
 
