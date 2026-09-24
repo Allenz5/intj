@@ -658,43 +658,13 @@ new ResizeObserver(() => {
 
 // ---- Picker settings inputs ----
 
-// A workload's agent command (default 'claude') and its sparse dirs (each in its own input; empty =
-// full checkout). Shown on the workload page, editable before opening, and saved with the workload.
-type WorkloadInfo = { id: string; title: string; agent: string; sparse: string[]; branch: string; base: string }
+// A workload's agent command (default 'claude'), plus its foundation-worktree fields: the branch and the
+// head it derives from. Shown on the workload page; branch/base apply only when creating a workload,
+// since an existing workload's worktree is already fixed.
+type WorkloadInfo = { id: string; title: string; agent: string; branch: string; base: string }
 const pickerAgentInput = $<HTMLInputElement>('picker-agent-cmd')
-// The foundation-worktree fields: a workload's branch and the head it derives from. Only shown (and only
-// applied) when creating a workload — an existing workload's worktree is already fixed.
 const pickerBranchInput = $<HTMLInputElement>('picker-branch')
 const pickerBaseInput = $<HTMLInputElement>('picker-base')
-
-function addSparseInput(value = '') {
-  const row = document.createElement('div')
-  row.className = 'sparse-row'
-  const input = document.createElement('input')
-  input.className = 'sparse-input'
-  input.placeholder = 'e.g. spark/dbr'
-  input.autocomplete = 'off'
-  input.spellcheck = false
-  input.value = value
-  const del = document.createElement('button')
-  del.type = 'button'
-  del.className = 'sparse-del'
-  del.textContent = '×'
-  del.title = 'Remove'
-  del.onclick = () => row.remove()
-  row.append(input, del)
-  $('sparse-list').append(row)
-  return input
-}
-// Always keep at least one (empty) row, so there's a field to type into.
-function setSparseInputs(dirs: string[]) {
-  $('sparse-list').replaceChildren()
-  for (const d of dirs.length ? dirs : ['']) addSparseInput(d)
-}
-const getSparseInputs = () =>
-  [...$('sparse-list').querySelectorAll<HTMLInputElement>('.sparse-input')].map((i) => i.value.trim()).filter(Boolean)
-
-$('sparse-add').onclick = () => addSparseInput().focus()
 
 // ---- Divider ----
 
@@ -790,7 +760,7 @@ function ensureEventsWs() {
 }
 
 // The server forgets the open project when it restarts, while the browser keeps it cached — so any
-// project-scoped call (opening a workload, the sparse-dir check) would run against the wrong directory.
+// project-scoped call (e.g. opening a workload) would run against the wrong directory.
 // Re-establish the project first so it runs against the right repo. Returns false if we can't.
 async function ensureProject(): Promise<boolean> {
   if (!clientProject) return false
@@ -959,19 +929,18 @@ function highlightSelected() {
   }
 }
 
-function fillConfig(agent: string, sparse: string[], branch = '', base = '') {
+function fillConfig(agent: string, branch = '', base = '') {
   pickerAgentInput.value = agent
-  setSparseInputs(sparse)
   pickerBranchInput.value = branch
   pickerBaseInput.value = base
 }
 
 // Select an existing workload: show (and let the user edit) its own settings before opening. Its
-// worktree is already fixed, so hide the branch/base fields (shown read-only for reference is not needed).
+// worktree is already fixed, so hide the branch/base fields.
 function selectWorkload(id: string) {
   selectedId = id
   const w = workloads.find((x) => x.id === id)
-  if (w) fillConfig(w.agent, w.sparse, w.branch, w.base)
+  if (w) fillConfig(w.agent, w.branch, w.base)
   $('picker-worktree').hidden = true
   highlightSelected()
   $('workload-open').textContent = 'Open workload'
@@ -982,7 +951,7 @@ function selectWorkload(id: string) {
 function selectNew() {
   selectedId = null
   const recent = workloads[0]
-  fillConfig(recent?.agent ?? 'claude', recent?.sparse ?? [], '', recent?.base ?? '')
+  fillConfig(recent?.agent ?? 'claude', '', recent?.base ?? '')
   $('picker-worktree').hidden = false
   highlightSelected()
   $('workload-open').textContent = 'Create workload'
@@ -998,7 +967,6 @@ $('workload-open').onclick = async () => {
     const res = await post('/api/workload', {
       id: selectedId ?? undefined,
       agent: pickerAgentInput.value,
-      sparse: getSparseInputs(),
       branch: pickerBranchInput.value.trim(),
       base: pickerBaseInput.value.trim(),
     })

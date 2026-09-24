@@ -21,15 +21,6 @@ let workloadRel = ''
 // The agent is just a command run in a terminal, so any CLI agent can be swapped in.
 // Mutable so the picker can set it before the main terminal starts.
 let agentCmd = process.env.OPENDOC_AGENT ?? 'claude'
-// Directories a session's worktree is cone-checked-out to; empty means a full checkout. Set from the
-// picker (or OPENDOC_SPARSE) to speed up worktree creation on a huge repo.
-// Strip zero-width/control characters (which JS trim() misses and which sneak in via paste/IME) before
-// trimming whitespace and trailing slashes, so an invisible char in a pasted dir name can't make a
-// valid path look "not found in the repo".
-const normDir = (d: string) => d.replace(/[\u0000-\u001F\u007F​-‍﻿]/g, '').trim().replace(/\/+$/, '')
-// Multiple dirs, separated by whitespace, commas, or colons; trailing slashes trimmed.
-const parseCone = (s: string) => s.split(/[\s:,]+/).map(normDir).filter(Boolean)
-let sparseCone = parseCone(process.env.OPENDOC_SPARSE ?? '')
 // A workload's foundation worktree: a checkout on its own branch, derived from `base` (fetched first),
 // that the main agent runs in and sessions branch from. Set from the picker when a workload is created;
 // an empty branch means no worktree — the workload runs on the main checkout, as before.
@@ -45,53 +36,29 @@ const git = async (args: string[], cwd = projectDir, env = process.env) =>
 
 // ---- Per-workload settings ----
 
-// Each workload keeps its own agent command and sparse dirs in its settings.json (untracked, like the
-// rest of .opendoc); a new workload copies the most recent one's (the picker seeds them). Applied to the
-// live agentCmd/sparseCone when the workload is opened, since sessions run against the open workload.
-type Settings = { agent: string; sparse: string[]; branch: string; base: string }
+// Each workload keeps its own agent command in its settings.json (untracked, like the rest of .opendoc);
+// a new workload copies the most recent one's (the picker seeds them). Applied to the live agentCmd when
+// the workload is opened, since sessions run against the open workload.
+type Settings = { agent: string; branch: string; base: string }
 const settingsFile = (workloadDir: string) => path.join(workloadDir, 'settings.json')
 function loadSettings(workloadDir: string): Settings {
   try {
     const s = JSON.parse(fs.readFileSync(settingsFile(workloadDir), 'utf8'))
     return {
       agent: typeof s.agent === 'string' && s.agent.trim() ? s.agent : 'claude',
-      sparse: Array.isArray(s.sparse) ? s.sparse.map(String).map(normDir).filter(Boolean) : [],
       branch: typeof s.branch === 'string' ? s.branch.trim() : '',
       base: typeof s.base === 'string' ? s.base.trim() : '',
     }
   } catch {
-    return { agent: 'claude', sparse: [], branch: '', base: '' }
+    return { agent: 'claude', branch: '', base: '' }
   }
 }
 function saveSettings() {
   if (!workloadDir) return
   fs.writeFileSync(
     settingsFile(workloadDir),
-    JSON.stringify({ agent: agentCmd, sparse: sparseCone, branch: workloadBranch, base: workloadBase }, null, 2),
+    JSON.stringify({ agent: agentCmd, branch: workloadBranch, base: workloadBase }, null, 2),
   )
-}
-
-// Check each sparse dir names a real directory in the repo at HEAD, so a session's worktree isn't
-// cone-checked out to nothing. Returns the dirs that don't exist (empty if all are fine, or the repo
-// has no commits yet — then there's nothing to check against). Paths are repo-root-relative, matching
-// how `git sparse-checkout set` reads them.
-async function invalidSparseDirs(dirs: string[]): Promise<string[]> {
-  if (!dirs.length) return []
-  try {
-    await git(['rev-parse', '--verify', 'HEAD'])
-  } catch {
-    return []
-  }
-  const bad: string[] = []
-  for (const d of dirs) {
-    try {
-      // HEAD:<path> is always repo-root-relative; a directory is a tree, a file a blob.
-      if ((await git(['cat-file', '-t', `HEAD:${d}`])).trim() !== 'tree') bad.push(d)
-    } catch {
-      bad.push(d)
-    }
-  }
-  return bad
 }
 
 // ---- Project and workload ----
@@ -130,15 +97,7 @@ async function createWorktree(branch: string, base: string) {
       startRef = head
     }
   }
-  const born = exists ? [dir, branch] : ['-b', branch, dir, startRef]
-  if (sparseCone.length) {
-    await git(['worktree', 'add', '--no-checkout', ...born])
-    await git(['sparse-checkout', 'init', '--cone', '--sparse-index'], dir)
-    await git(['sparse-checkout', 'set', ...sparseCone], dir)
-    await git(['checkout'], dir)
-  } else {
-    await git(['worktree', 'add', ...born])
-  }
+  await git(['worktree', 'add', ...(exists ? [dir, branch] : ['-b', branch, dir, startRef])])
 }
 
 async function openProject(dir: string) {
@@ -165,8 +124,8 @@ function listWorkloads() {
   const ids = fs.existsSync(root) ? fs.readdirSync(root).filter((n) => WORKLOAD.test(n)).sort().reverse() : []
   return ids.map((id) => {
     const dir = path.join(root, id)
-    const { agent, sparse, branch, base } = loadSettings(dir)
-    return { id, title: readDoc(path.join(dir, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '', agent, sparse, branch, base }
+    const { agent, branch, base } = loadSettings(dir)
+    return { id, title: readDoc(path.join(dir, 'main.md')).match(/^#\s+(.+)/m)?.[1] ?? '', agent, branch, base }
   })
 }
 
@@ -734,18 +693,7 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       // the agent must commit for its work to flow down to sessions derived from it.
       const srcWorktree = from ? from.worktree : workloadRoot()
       const startPoint = (await git(['rev-parse', 'HEAD'], srcWorktree)).trim()
-      // Materializing a huge repo's whole tree is the bottleneck. When OPENDOC_SPARSE names directories,
-      // do a cone checkout of just those (with a sparse index) so creation and later git ops touch far
-      // fewer files; otherwise check out the full tree.
-      const cone = sparseCone
-      if (cone.length) {
-        await git(['worktree', 'add', '--no-checkout', '-b', branch, worktree, startPoint])
-        await git(['sparse-checkout', 'init', '--cone', '--sparse-index'], worktree)
-        await git(['sparse-checkout', 'set', ...cone], worktree)
-        await git(['checkout'], worktree)
-      } else {
-        await git(['worktree', 'add', '-b', branch, worktree, startPoint])
-      }
+      await git(['worktree', 'add', '-b', branch, worktree, startPoint])
       // Docs are outside git: copy the workload's docs into the worktree and record each one's
       // content as this session's merge base. A fork starts from its source session's docs.
       const srcDocDir = from ? path.join(from.worktree, workloadRel) : workloadDir
@@ -899,7 +847,7 @@ server.on('request', async (req, res) => {
   try {
     const docName = searchParams.get('name') ?? ''
     if (req.method === 'GET' && url === '/api/state') {
-      return sendJson(res, 200, { workload: workloadDir && path.basename(workloadDir), agent: agentCmd, sparse: sparseCone.join(' ') })
+      return sendJson(res, 200, { workload: workloadDir && path.basename(workloadDir), agent: agentCmd })
     }
     if (req.method === 'GET' && url === '/api/dirs') {
       const dir = path.resolve(searchParams.get('path') || startDir)
@@ -916,30 +864,16 @@ server.on('request', async (req, res) => {
       return sendJson(res, 200, { project: projectDir, workloads })
     }
     if (req.method === 'POST' && url === '/api/workload') {
-      const { id, agent, sparse, branch, base } = await readBody(req)
+      const { id, agent, branch, base } = await readBody(req)
       // No project open (e.g. the server was restarted while the browser kept the picker open): bail
-      // clearly instead of running git — and thus the sparse-dir check — against the wrong directory.
+      // clearly instead of running git against the wrong directory.
       if (!projectDir) return sendJson(res, 409, { error: 'no project open' })
-      // The agent command and sparse dirs come from the picker (the config it shows for this workload,
-      // seeded from the most recent one for a new workload). Reject sparse dirs that don't exist in the
-      // repo before opening, so a session's worktree isn't cone-checked out to nothing.
-      const cone =
-        sparse === undefined ? undefined : Array.isArray(sparse) ? sparse.map(String).map(normDir).filter(Boolean) : parseCone(String(sparse))
-      if (cone) {
-        const bad = await invalidSparseDirs(cone)
-        if (bad.length)
-          return sendJson(res, 400, {
-            // Quote each value so any stray/invisible character in it is visible in the message.
-            error: `Sparse ${bad.length > 1 ? 'directories' : 'directory'} not found in the repo: ${bad.map((d) => JSON.stringify(d)).join(', ')}`,
-          })
-      }
       const created = await openWorkload(id)
       // Apply the picker's values to this workload and persist them; fall back to its saved settings
       // when the picker sent none (e.g. reopening straight from a link). Branch/base only define a new
       // workload's foundation worktree, so they come from its saved settings for an existing one.
       const saved = loadSettings(workloadDir)
       agentCmd = typeof agent === 'string' ? agent.trim() || 'claude' : saved.agent
-      sparseCone = cone ?? saved.sparse
       workloadBranch = created && typeof branch === 'string' ? branch.trim() : saved.branch
       workloadBase = created && typeof base === 'string' ? base.trim() : saved.base
       saveSettings()
