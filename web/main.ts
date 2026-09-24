@@ -533,6 +533,19 @@ function sendResize(t: Term) {
   }
 }
 
+// On attach the server replays the whole raw output buffer; for a stateful TUI that leaves the screen
+// (especially the input box) garbled, because the agent only fully repaints on a resize. Nudge a
+// SIGWINCH — shrink a row then restore — so the agent redraws cleanly over the replayed bytes. Run once
+// per fresh connection, after the buffer has been replayed and the real size is set.
+function forceRepaint(t: Term) {
+  const { cols, rows } = t.term
+  if (t.ws.readyState !== WebSocket.OPEN || rows < 2) return
+  t.ws.send(JSON.stringify({ type: 'resize', cols, rows: rows - 1 }))
+  setTimeout(() => {
+    if (t.ws.readyState === WebSocket.OPEN) t.ws.send(JSON.stringify({ type: 'resize', cols, rows }))
+  }, 60)
+}
+
 // The agent's TUI turns on mouse reporting and uses it to select and edit text in its input, scroll,
 // etc. — so let xterm forward the mouse to it (a plain drag is the agent's, so selecting in the input
 // and deleting works). To still copy from the browser, hold Option (macOS, via
@@ -607,7 +620,11 @@ function openTerminal(s: Pick<Session, 'id' | 'branch'>) {
     enableCopyPaste(term, send)
     t = { term, fit, ws, el }
     const cur = t
-    ws.onopen = () => sendResize(cur)
+    ws.onopen = () => {
+      sendResize(cur)
+      // After the replayed buffer has been written and the real size is set, force a clean repaint.
+      setTimeout(() => forceRepaint(cur), 150)
+    }
     ws.onmessage = (e) => term.write(e.data)
     term.onData(send)
     terms.set(s.id, t)

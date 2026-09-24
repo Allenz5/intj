@@ -267,14 +267,43 @@ const agentIsIsaac = () => /(^|\/)isaac$/.test(agentCmd.trim().split(/\s+/)[0] ?
 // Resuming a saved conversation: isaac uses a `resume <id>` subcommand, Claude Code a `--resume <id>` flag.
 const resumeCmd = (chat: string) => (agentIsIsaac() ? `${agentCmd} resume ${chat}` : `${agentCmd} --resume ${chat}`)
 
-// Agent status is inferred generically from terminal output, not agent-specific hooks: while an agent
-// works it streams output, and while it waits for input the output goes quiet. So any output marks the
-// terminal busy, and after this much silence it's marked idle again — this works for any CLI agent.
-const IDLE_MS = 1200
+// Agent status is inferred generically (no agent-specific hooks), so it works for any CLI agent, from
+// two signals:
+//   1. Output — while an agent works it streams output; any output marks the terminal busy.
+//   2. Foreground process group — a tool running in the terminal foreground (e.g. a shell agent running
+//      `bazel test`) means the agent is busy even when it is producing no output. So before flipping
+//      back to idle after the output goes quiet, we check the pty's foreground group: if a child group
+//      owns it, stay busy and re-check; only idle once output is quiet AND the agent itself is foreground.
+const IDLE_MS = 2000
+const FG_POLL_MS = 800
+
+// Whether a child process group owns the terminal's foreground (a foreground tool is running). Uses ps
+// (portable across Linux/macOS): the process's own group is `pgid`, the tty's foreground group `tpgid`;
+// they differ when a child holds the foreground. Agents that pipe their tools (e.g. Claude Code) keep
+// the foreground themselves, so this is simply false for them and status falls back to output alone.
+async function hasForegroundChild(pid: number | undefined): Promise<boolean> {
+  if (!pid) return false
+  try {
+    const out = (await execFileP('ps', ['-o', 'pgid=,tpgid=', '-p', String(pid)])).stdout
+    const [pgid, tpgid] = out.trim().split(/\s+/).map(Number)
+    return Number.isInteger(tpgid) && tpgid > 0 && tpgid !== pgid
+  } catch {
+    return false
+  }
+}
+
+function armIdle(t: AgentTerm, id: string, delay: number) {
+  clearTimeout(t.idleTimer)
+  t.idleTimer = setTimeout(async () => {
+    // A foreground tool means the agent is still working despite the quiet — keep busy and re-check.
+    if (await hasForegroundChild(t.term?.pid)) return armIdle(t, id, FG_POLL_MS)
+    setBusy(id, false)
+  }, delay)
+}
+
 function noteActivity(t: AgentTerm, id: string) {
   setBusy(id, true)
-  clearTimeout(t.idleTimer)
-  t.idleTimer = setTimeout(() => setBusy(id, false), IDLE_MS)
+  armIdle(t, id, IDLE_MS)
 }
 
 const newTerm = (): AgentTerm => ({ status: 'creating', busy: true, term: null, buffer: '', clients: new Set() })
