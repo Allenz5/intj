@@ -273,9 +273,9 @@ type AgentTerm = {
   idleTimer?: ReturnType<typeof setTimeout>
 }
 const MAX_BUFFER = 500_000
-// Agents differ in how they resume/fork a conversation. isaac keeps its conversations in its own
-// (local or cloud) session store rather than Claude Code's <id>.jsonl, so forking uses
-// `isaac resume <id> --fork` instead of copying the transcript and passing --resume --fork-session.
+// Agents differ in how they resume/fork a conversation. Both keep local conversations as Claude
+// Code's cwd-keyed <id>.jsonl (see copyChat), but isaac forks with `isaac resume <id> --fork`
+// rather than --resume --fork-session, and can also resolve cloud sessions by id.
 const agentIsIsaac = () => /(^|\/)isaac$/.test(agentCmd.trim().split(/\s+/)[0] ?? '')
 // Resuming a saved conversation: isaac uses a `resume <id>` subcommand, Claude Code a `--resume <id>` flag.
 const resumeCmd = (chat: string) => (agentIsIsaac() ? `${agentCmd} resume ${chat}` : `${agentCmd} --resume ${chat}`)
@@ -718,8 +718,8 @@ function restoreSessions() {
   broadcastSessions()
 }
 
-// Claude Code keeps each conversation at <config>/projects/<cwd, non-alphanumerics as '-'>/<id>.jsonl
-// and --resume only looks in the current cwd's folder. A fork runs in a new worktree, so copy the
+// Claude Code (and isaac, for local sessions) keeps each conversation at
+// <config>/projects/<cwd, non-alphanumerics as '-'>/<id>.jsonl and resume only looks in the current cwd's folder. A fork runs in a new worktree, so copy the
 // source conversation into that worktree's folder first (it's written as the chat goes, so a running
 // chat can be forked too).
 function copyChat(chat: string, worktree: string) {
@@ -728,7 +728,11 @@ function copyChat(chat: string, worktree: string) {
   const src = fs.existsSync(projects)
     ? fs.readdirSync(projects).map((d) => path.join(projects, d, name)).find((p) => fs.existsSync(p))
     : undefined
-  if (!src) throw new Error(`Conversation ${chat} not found under ${projects}`)
+  if (!src) {
+    // isaac may resolve it as a cloud session instead; Claude Code has nowhere else to look.
+    if (agentIsIsaac()) return
+    throw new Error(`Conversation ${chat} not found under ${projects}`)
+  }
   const dst = path.join(projects, worktree.replace(/[^a-zA-Z0-9]/g, '-'), name)
   fs.mkdirSync(path.dirname(dst), { recursive: true })
   fs.copyFileSync(src, dst)
@@ -784,14 +788,16 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       let text = skill ? `${cmd}\n\n${context}` : context
       // The forked conversation names the old worktree's paths, so point the agent at its own copy.
       if (from) text = `(Forked: you now work in ${s.worktree}, a copy of ${from.worktree}. Edit files here only.)\n\n${text}`
+      // Both agents look up a local conversation only under the launch cwd's folder, so the source
+      // must be copied next to the new worktree first.
+      if (from) copyChat(from.chat, s.worktree)
       if (from && agentIsIsaac()) {
-        // isaac resolves the source by id (local or cloud) and branches it with `resume --fork`; the
-        // prompt can't be a launch argument, so type it in once the resumed session is ready. Status
-        // is tracked generically from output (noteActivity), so this path needs no special handling.
+        // isaac branches the source with `resume --fork`; the prompt can't be a launch argument, so
+        // type it in once the resumed session is ready. Status is tracked generically from output
+        // (noteActivity), so this path needs no special handling.
         startTerm(s, s.worktree, `${agentCmd} resume ${from.chat} --fork`)
         sendWhenReady(s, text)
       } else {
-        if (from) copyChat(from.chat, s.worktree)
         const resume = from ? `--resume ${from.chat} --fork-session ` : ''
         // Pass the prompt through the environment to avoid shell quoting issues.
         startTerm(s, s.worktree, `${agentCmd} ${resume}--session-id ${chat} "$OPENDOC_PROMPT"`, { OPENDOC_PROMPT: text })
