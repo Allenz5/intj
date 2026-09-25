@@ -76,6 +76,27 @@ async function dropWorktree(worktree: string, branch: string, qt: string) {
   }
 }
 
+// Read the committed HEAD of a source worktree, used as the start point for a new (or forked) worktree.
+// A quicktree overlay is lost on restart/reboot (mounts don't auto-remount) and left as an empty non-repo
+// dir, so `rev-parse` fails; reattach it by name — a targeted `mount`, then the "after restart" recovery —
+// and retry once, so forking a quicktree session still works after a reconnect. `qt` empty = plain git
+// worktree, always live: no remount, original error surfaces.
+async function sourceHead(worktree: string, qt: string): Promise<string> {
+  try {
+    return (await git(['rev-parse', 'HEAD'], worktree)).trim()
+  } catch (e) {
+    if (!qt) throw e
+    await execFileP('quicktree', ['mount', qt], { cwd: projectDir, env: process.env })
+      .catch(() => execFileP('quicktree', ['remount-all', '--force'], { cwd: projectDir, env: process.env }))
+      .catch(() => {})
+    try {
+      return (await git(['rev-parse', 'HEAD'], worktree)).trim()
+    } catch {
+      throw new Error(`Can't fork: the source session's quicktree worktree (${qt}) is no longer available`)
+    }
+  }
+}
+
 // ---- Per-workload settings ----
 
 // Each workload keeps its own agent command in its settings.json (untracked, like the rest of .opendoc);
@@ -743,7 +764,7 @@ function copyChat(chat: string, worktree: string) {
 // With `from`, the session starts from that session's files and conversation as they are now.
 // The card is shown at once in a 'creating' state; the worktree is built and the agent started
 // off the event loop, so a slow repo doesn't block the request or freeze the server.
-function startSession(doc: string, anchor: Anchor, prompt: string, skill?: string, from?: Pick<Session, 'id' | 'worktree' | 'chat'>) {
+function startSession(doc: string, anchor: Anchor, prompt: string, skill?: string, from?: Pick<Session, 'id' | 'worktree' | 'chat' | 'qt'>) {
   const { quote } = anchor
   const id = crypto.randomBytes(3).toString('hex')
   const branch = `opendoc/${id}`
@@ -764,7 +785,11 @@ function startSession(doc: string, anchor: Anchor, prompt: string, skill?: strin
       // session, or the source session's worktree for a fork. Uncommitted work does not carry over, so
       // the agent must commit for its work to flow down to sessions derived from it.
       const srcWorktree = from ? from.worktree : workloadRoot()
-      const startPoint = (await git(['rev-parse', 'HEAD'], srcWorktree)).trim()
+      // For a fork the source is another session's worktree (its quicktree name, if any, on `from.qt`); for
+      // a new session it's the foundation, whose quicktree name is workloadRootQt. sourceHead remounts a
+      // dangling quicktree overlay before reading HEAD so a fork survives a server/host reconnect.
+      const srcQt = from ? from.qt : workloadRootQt
+      const startPoint = await sourceHead(srcWorktree, srcQt)
       const built = await makeWorktree(branch, startPoint, gitDir, workloadUseQt)
       s.worktree = built.path
       s.qt = built.qt
@@ -1021,12 +1046,12 @@ server.on('request', async (req, res) => {
     }
     if (req.method === 'POST' && url === '/api/sessions') {
       const { doc, anchor, prompt, skill, from } = await readBody(req)
-      let src: Pick<Session, 'id' | 'worktree' | 'chat'> | undefined
+      let src: Pick<Session, 'id' | 'worktree' | 'chat' | 'qt'> | undefined
       if (from === 'main') {
         // Fork from the active workload's main agent: its checkout and conversation are the source.
         const chat = mains.get(activeWid())?.chat
         if (!chat) return sendJson(res, 400, { error: 'Open the main agent and send it a message before forking from it' })
-        src = { id: 'main', worktree: workloadRoot(), chat }
+        src = { id: 'main', worktree: workloadRoot(), chat, qt: workloadRootQt }
       } else if (from) {
         src = sessions.get(from)
         if (!src) return sendJson(res, 404, { error: `no session ${from}` })
